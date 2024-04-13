@@ -1,0 +1,19 @@
+[package]
+name = "copysl"
+version = "0.1.0"
+authors = ["glaceglace <jingy.xie@gmail.com>"]
+edition = "2021"
+build = "src/build.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+arboard = "3.3.2"
+fltk = { version = "^1.4", features = ["fltk-bundled"] }
+fltk-sys = "1.4.28"
+
+[build-dependencies]
+fl2rust = "^0.5.19"
+
+[profile.release]
+opt-level = "s"

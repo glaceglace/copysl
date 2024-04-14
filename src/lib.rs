@@ -56,8 +56,77 @@ pub mod clipboard_utils {
     }
 }
 
+pub mod stack {
+    pub struct Stack<T> {
+        pub collection: Vec<T>,
+    }
+
+    impl<T> Default for Stack<T> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl<T> Stack<T> {
+        pub fn new() -> Self {
+            Stack {
+                collection: vec![]
+            }
+        }
+        pub fn is_empty(&self) -> bool {
+            self.collection.is_empty()
+        }
+        pub fn push(&mut self, element: T) {
+            self.collection.insert(0, element)
+        }
+        pub fn pop(&mut self) -> Option<T> {
+            if self.is_empty() {
+                None
+            } else {
+                Some(self.collection.remove(0))
+            }
+        }
+        pub fn peek(&mut self) -> Option<&T> {
+            self.collection.first()
+        }
+        pub fn len(&self) -> usize {
+            self.collection.len()
+        }
+    }
+}
+
 #[cfg(test)]
-mod tests {
+mod stack_tests {
+    use crate::stack::Stack;
+
+    #[test]
+    fn test_stack() {
+        let mut stack: Stack<i32> = Stack::new();
+        stack.push(0);
+        stack.push(1);
+        stack.push(2);
+        stack.push(3);
+        assert_eq!(*stack.collection.first().unwrap(), 3);
+        assert_eq!(*stack.collection.get(1).unwrap(), 2);
+        assert_eq!(*stack.collection.get(2).unwrap(), 1);
+        assert_eq!(*stack.collection.last().unwrap(), 0);
+
+        assert_eq!(*stack.peek().unwrap(), 3);
+        assert_eq!(stack.len(), 4);
+        assert_eq!(stack.pop().unwrap(), 3);
+        assert_eq!(stack.pop().unwrap(), 2);
+        assert_eq!(stack.len(), 2);
+        assert_eq!(*stack.peek().unwrap(), 1);
+        assert_eq!(stack.is_empty(), false);
+        stack.pop();
+        stack.pop();
+        assert_eq!(stack.is_empty(), true);
+        assert_eq!(stack.pop(), None);
+    }
+}
+
+#[cfg(test)]
+mod clipboard_observer_tests {
     use arboard::Clipboard;
     use super::ClipboardObserver;
 

@@ -11,6 +11,7 @@ use fltk::group::Scroll;
 use fltk::text::{Cursor, TextDisplay, TextEditor};
 use fltk::widget::Widget;
 use fltk_sys::fl;
+use once_cell::sync::Lazy;
 
 use copysl::clipboard_utils::ClipboardObserver;
 
@@ -19,15 +20,22 @@ mod ui;
 // let CLIPBOARD_VEC_PTR: *mut Vec<ClipBoardElement> = vec![].as_mut_ptr();
 static mut CLIPBOARD_VEC: ClipboardVec = ClipboardVec(vec![]);
 static mut DISPLAY_VEC: DisplaydVec = DisplaydVec(vec![]);
-
-
-fn main() {
-    let mut clipboard_observer = match Clipboard::new() {
+static mut CLIPBOARD_OBSERVER: Lazy<ClipboardObserver> = Lazy::new(|| {
+    match Clipboard::new() {
         Ok(good_clipboard) => {
             ClipboardObserver::new_with_clipboard(good_clipboard)
         }
         Err(err) => { panic!("Failed to observe clipboard, nested error is {}", err) }
-    };
+    }
+});
+
+fn main() {
+    // let mut clipboard_observer = match Clipboard::new() {
+    //     Ok(good_clipboard) => {
+    //         ClipboardObserver::new_with_clipboard(good_clipboard)
+    //     }
+    //     Err(err) => { panic!("Failed to observe clipboard, nested error is {}", err) }
+    // };
 
 
     let app = app::App::default().with_scheme(app::Scheme::Plastic);
@@ -47,7 +55,7 @@ fn main() {
     // app.run().unwrap()
     while app.wait() {
         unsafe {
-            clipboard_observer.observe(&mut |last_content| {
+            CLIPBOARD_OBSERVER.observe(&mut |last_content| {
                 // let last_content_clone = last_content.to_owned();
                 CLIPBOARD_VEC.0.push(ClipBoardElement::build(last_content));
 
@@ -70,10 +78,14 @@ fn main() {
                             }
                         };
 
+                        // clipboard_observer.clipboard.set_text(
+                        let x = &CLIPBOARD_VEC.0.last()
+                            .expect(
+                                "The content shall sure be existed").content.to_owned();
+                        println!("========{}",x);
                         cb.set_text(
-                            &CLIPBOARD_VEC.0.last()
-                                .expect(
-                                    "The content shall sure be existed").content
+                            // "abcde"
+                            x
                         )
                             .unwrap_or_else(|err|
                                 {
@@ -160,10 +172,9 @@ impl Size for WSize {
         //TODO make a responsive pixel
         let scale: f32 = 1.0;
         let current_screen_w: i32 = app::Screen::all_screens().iter()
-            .filter(|screen| {
+            .find(|screen| {
                 screen.is_valid()
             })
-            .next()
             .map(|screen| screen.w())
             .unwrap_or(2560);
         (self.0 as f32 * current_screen_w as f32 * scale / Self::TIMES_CONST).round() as i32
@@ -175,10 +186,9 @@ impl Size for HSize {
         //TODO make a responsive pixel
         let scale: f32 = 1.0;
         let current_screen_h: i32 = app::Screen::all_screens().iter()
-            .filter(|screen| {
+            .find(|screen| {
                 screen.is_valid()
             })
-            .next()
             .map(|screen| screen.h())
             .unwrap_or(1440);
         (self.0 as f32 * current_screen_h as f32 * scale / Self::TIMES_CONST).round() as i32
@@ -189,10 +199,9 @@ pub fn adapted_window_size_wh() -> (i32, i32) {
     let coef_w: f32 = 7.5;
     let coef_h: f32 = 2.0;
     let (current_screen_w, current_screen_h): (i32, i32) = app::Screen::all_screens().iter()
-        .filter(|screen| {
+        .find(|screen| {
             screen.is_valid()
         })
-        .next()
         .map(|screen| (screen.w(), screen.h()))
         .unwrap_or((2560, 1440));
 

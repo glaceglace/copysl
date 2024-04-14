@@ -1,5 +1,6 @@
 use std::fmt::Debug;
-use arboard::Clipboard;
+use std::path::Display;
+use arboard::{Clipboard, Error};
 
 use fltk::{app, prelude::*, text, window::Window};
 use fltk::app::{event_dy, event_x, event_y};
@@ -14,12 +15,13 @@ use fltk_sys::fl;
 use once_cell::sync::Lazy;
 
 use copysl::clipboard_utils::ClipboardObserver;
+use copysl::stack::Stack;
 
 mod ui;
 
 // let CLIPBOARD_VEC_PTR: *mut Vec<ClipBoardElement> = vec![].as_mut_ptr();
-static mut CLIPBOARD_VEC: ClipboardVec = ClipboardVec(vec![]);
-static mut DISPLAY_VEC: DisplaydVec = DisplaydVec(vec![]);
+static mut CLIPBOARD_STACK: Lazy<Stack<ClipBoardElement>> = Lazy::new(|| { Stack::new() });
+static mut DISPLAY_VEC: Lazy<Vec<TextDisplay>> = Lazy::new(|| { vec![] });
 static mut CLIPBOARD_OBSERVER: Lazy<ClipboardObserver> = Lazy::new(|| {
     match Clipboard::new() {
         Ok(good_clipboard) => {
@@ -56,70 +58,81 @@ fn main() {
     while app.wait() {
         unsafe {
             CLIPBOARD_OBSERVER.observe(&mut |last_content| {
-                // let last_content_clone = last_content.to_owned();
-                CLIPBOARD_VEC.0.push(ClipBoardElement::build(last_content));
+                println!("+++++++{:#?}", last_content);
 
-                let height = ((h - 10) as f32 / 5.0).round() as i32;
-                let mut display_element = TextDisplay::new(0, total_height, w, height, None);
-                let last_element = DISPLAY_VEC.0.last();
-                if last_element.is_some() {
-                    display_element = display_element.below_of(last_element.unwrap(), 3)
+                let found_cb_element = CLIPBOARD_STACK.collection.iter().enumerate()
+                    .find(|(_, cb_element)| {
+                        last_content.eq(&cb_element.content)
+                    });
+
+                if found_cb_element.is_some() {
+                    let (idx, _) = found_cb_element.unwrap();
+                    let removed = CLIPBOARD_STACK.collection.remove(idx);
+                    CLIPBOARD_STACK.push(removed);
+                } else {
+                    CLIPBOARD_STACK.push(ClipBoardElement::build(last_content));
                 }
-                // display_element.deactivate();
-                display_element.handle(move |td: &mut TextDisplay, event: Event| {
-                    if event == Event::Push {
-                        let mut cb = match Clipboard::new() {
-                            Ok(good_clipboard) => {
-                                good_clipboard
-                            }
-                            Err(err) => {
-                                println!("Failed to observe clipboard, nested error is {}", err);
-                                return true;
-                            }
-                        };
 
-                        // clipboard_observer.clipboard.set_text(
-                        let x = &CLIPBOARD_VEC.0.last()
-                            .expect(
-                                "The content shall sure be existed").content.to_owned();
-                        println!("========{}",x);
-                        cb.set_text(
-                            // "abcde"
-                            x
-                        )
-                            .unwrap_or_else(|err|
-                                {
-                                    println!("Error while clicking on a existed content, nested error is {}", err)
+                DISPLAY_VEC.clear();
+                let height = ((h - 10) as f32 / 5.0).round() as i32;
+                for (i, cb) in CLIPBOARD_STACK.collection.iter().enumerate() {
+                    let scroll_y = scroll.yposition();
+                    let mut td_element: TextDisplay = if i == 0 {
+                        TextDisplay::new(0, 0-scroll_y, w, height, None)
+                    } else {
+                        TextDisplay::new(0, 0-scroll_y, w, height, None).below_of(DISPLAY_VEC.get(i - 1).unwrap(), 3)
+                    };
+                    td_element.handle(move |td: &mut TextDisplay, event: Event| {
+                        if event == Event::Push {
+                            my_window.
+                            let mut cb = match Clipboard::new() {
+                                Ok(good_clipboard) => {
+                                    good_clipboard
                                 }
-                            );
-                        return true;
-                    }
+                                Err(err) => {
+                                    println!("Failed to observe clipboard, nested error is {}", err);
+                                    return true;
+                                }
+                            };
 
-                    if event == Event::Move {
-                        let mouse_x = event_x();
-                        let mouse_y = event_y();
+                            // clipboard_observer.clipboard.set_text(
+                            let text = td.buffer().expect("The content shall sure be existed").text();
 
-                        return if mouse_x >= td.x() && mouse_x <= td.x() + td.w() && mouse_y >= td.y() && mouse_y <= td.y() + td.h() {
-                            set_cursor(fltk::enums::Cursor::Hand);
-                            true
-                        } else {
-                            set_cursor(fltk::enums::Cursor::Default);
-                            true
-                        };
-                    }
+                            match cb.set_text(
+                                text
+                            ) {
+                                Ok(_) => {
+                                    // CLIPBOARD_STACK.push(text);
+                                }
+                                Err(err) => { println!("Error while clicking on a existed content, nested error is {}", err) }
+                            }
 
-                    false
-                });
+                            return true;
+                        }
 
-                display_element.set_scrollbar_size(1);
-                let mut buf = text::TextBuffer::default();
-                display_element.set_buffer(buf.clone());
-                buf.set_text(last_content);
-                scroll.add(&display_element);
+                        if event == Event::Move {
+                            let mouse_x = event_x();
+                            let mouse_y = event_y();
+
+                            return if mouse_x >= td.x() && mouse_x <= td.x() + td.w() && mouse_y >= td.y() && mouse_y <= td.y() + td.h() {
+                                set_cursor(fltk::enums::Cursor::Hand);
+                                true
+                            } else {
+                                set_cursor(fltk::enums::Cursor::Default);
+                                true
+                            };
+                        }
+
+                        false
+                    });
+                    td_element.set_scrollbar_size(1);
+                    let mut buf = text::TextBuffer::default();
+                    td_element.set_buffer(buf.clone());
+                    buf.set_text(&cb.content);
+                    scroll.add(&td_element);
+                    DISPLAY_VEC.push(td_element);
+                }
                 scroll.end();
-
-                DISPLAY_VEC.0.push(display_element);
-                total_height += height;
                 my_window.redraw();
             });
         }
@@ -127,10 +140,10 @@ fn main() {
 }
 
 #[derive(Debug)]
-struct ClipboardVec(Vec<ClipBoardElement>);
+struct ClipboardVec(Stack<ClipBoardElement>);
 
 #[derive(Debug)]
-struct DisplaydVec(Vec<TextDisplay>);
+struct DisplaydVec(Stack<TextDisplay>);
 
 
 #[derive(Debug)]

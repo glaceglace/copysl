@@ -57,8 +57,16 @@ pub mod clipboard_utils {
 }
 
 pub mod stack {
+    use std::fmt::{Debug, Formatter};
+    use std::vec::IntoIter;
+
     pub struct Stack<T> {
         pub collection: Vec<T>,
+    }
+    impl<T: Debug> Debug for Stack<T> {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            Debug::fmt(&self.collection, f)
+        }
     }
 
     impl<T> Default for Stack<T> {
@@ -66,7 +74,22 @@ pub mod stack {
             Self::new()
         }
     }
+impl<T> Iterator for Stack<T>{
+    type Item = T;
 
+    fn next(&mut self) -> Option<Self::Item> {
+        self.pop()
+    }
+}
+
+// impl<T> IntoIterator for Stack<T>{
+//     type Item = T;
+//     type IntoIter = IntoIter<T>;
+// 
+//     fn into_iter(self) -> Self::IntoIter {
+//         self.collection.into_iter()
+//     }
+// }
     impl<T> Stack<T> {
         pub fn new() -> Self {
             Stack {
@@ -91,6 +114,12 @@ pub mod stack {
         }
         pub fn len(&self) -> usize {
             self.collection.len()
+        }
+        pub fn clear(&mut self){
+            self.collection.clear();
+        }
+        pub fn get(&mut self, idx:usize)->Option<&T>{
+            self.collection.get(idx)
         }
     }
 }

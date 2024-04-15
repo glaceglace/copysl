@@ -1,0 +1,108 @@
+use std::collections::HashMap;
+use std::ffi::c_ulong;
+use std::mem::MaybeUninit;
+use std::os::raw::c_int;
+use std::ptr::null;
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Mutex;
+
+use once_cell::sync::Lazy;
+use uinput::event::relative::Position;
+use x11::keysym::{XK_Control_L, XK_V};
+use x11::xlib::{Display, False, True, Window, XFlush, XGetKeyboardControl, XInitThreads, XKeyboardState, XKeysymToKeycode, XLockDisplay, XOpenDisplay, XUnlockDisplay};
+use x11::xtest::XTestFakeKeyEvent;
+
+use crate::inputs::{key_to_scan_code, KeybdKey};
+
+type KeyStatesMap = HashMap<KeybdKey, bool>;
+static FAKE_DEVICE: Lazy<Mutex<uinput::Device>> = Lazy::new(|| {
+    Mutex::new(
+        uinput::default()
+            .unwrap()
+            .event(uinput::event::Keyboard::All)
+            .unwrap()
+            .create()
+            .unwrap()
+    )
+});
+static SEND_DISPLAY: Lazy<AtomicPtr<Display>> = Lazy::new(|| {
+    unsafe { XInitThreads() };
+    AtomicPtr::new(unsafe { XOpenDisplay(null()) })
+});
+static KEY_STATES: Lazy<Mutex<KeyStatesMap>> = Lazy::new(|| Mutex::new(KeyStatesMap::new()));
+
+impl KeybdKey {
+    /// Returns true if a given `KeybdKey` is currently pressed (in the down position).
+    // pub fn is_pressed(self) -> bool {
+    //     *KEY_STATES.lock().unwrap().entry(self).or_insert(false)
+    // }
+
+    /// Presses a given `KeybdKey`. Note: this means the key will remain in the down
+    /// position. You must manually call release to create a full 'press'.
+    pub fn press(self) {
+        let mut device = FAKE_DEVICE.lock().unwrap();
+
+        device.write(0x01, key_to_scan_code(self), 1).unwrap();
+        device.synchronize().unwrap();
+    }
+
+    /// Releases a given `KeybdKey`. This means the key would be in the up position.
+    pub fn release(self) {
+        let mut device = FAKE_DEVICE.lock().unwrap();
+
+        device.write(0x01, key_to_scan_code(self), 0).unwrap();
+        device.synchronize().unwrap();
+    }
+
+    /// Returns true if a keyboard key which supports toggling (ScrollLock, NumLock,
+    /// CapsLock) is on.
+    pub fn is_toggled(self) -> bool {
+        if let Some(key) = match self {
+            KeybdKey::ScrollLockKey => Some(4),
+            KeybdKey::NumLockKey => Some(2),
+            KeybdKey::CapsLockKey => Some(1),
+            _ => None,
+        } {
+            let mut state: XKeyboardState = unsafe { MaybeUninit::zeroed().assume_init() };
+            SEND_DISPLAY.with(|display| unsafe {
+                XGetKeyboardControl(display, &mut state);
+            });
+            state.led_mask & key != 0
+        } else {
+            false
+        }
+    }
+}
+trait DisplayAcquirable {
+    fn with<F, Z>(&self, cb: F) -> Z
+        where
+            F: FnOnce(*mut Display) -> Z;
+}
+
+impl DisplayAcquirable for AtomicPtr<Display> {
+    fn with<F, Z>(&self, cb: F) -> Z
+        where
+            F: FnOnce(*mut Display) -> Z,
+    {
+        let display = self.load(Ordering::Relaxed);
+        unsafe {
+            XLockDisplay(display);
+        };
+        let cb_result = cb(display);
+        unsafe {
+            XFlush(display);
+            XUnlockDisplay(display);
+        };
+        cb_result
+    }
+}
+pub fn x11_paste_action() {
+    use x11::xlib::*;
+
+    KeybdKey::LKey.press();
+        // Simulate Ctrl+V keyboard shortcut
+
+        // Close X11 connection
+
+    }
+

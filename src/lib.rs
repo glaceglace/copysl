@@ -1,3 +1,6 @@
+pub mod system;
+mod inputs;
+
 use crate::clipboard_utils::ClipboardObserver;
 
 pub mod clipboard_utils {
@@ -81,15 +84,7 @@ impl<T> Iterator for Stack<T>{
         self.pop()
     }
 }
-
-// impl<T> IntoIterator for Stack<T>{
-//     type Item = T;
-//     type IntoIter = IntoIter<T>;
-// 
-//     fn into_iter(self) -> Self::IntoIter {
-//         self.collection.into_iter()
-//     }
-// }
+    
     impl<T> Stack<T> {
         pub fn new() -> Self {
             Stack {

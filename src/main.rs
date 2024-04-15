@@ -3,7 +3,7 @@ use std::path::Display;
 use arboard::{Clipboard, Error};
 
 use fltk::{app, prelude::*, text, window::Window};
-use fltk::app::{event_dy, event_x, event_y};
+use fltk::app::{event_dy, event_x, event_y, windows};
 use fltk::button::Button;
 use fltk::draw::set_cursor;
 use fltk::enums::Cursor::Hand;
@@ -16,6 +16,7 @@ use once_cell::sync::Lazy;
 
 use copysl::clipboard_utils::ClipboardObserver;
 use copysl::stack::Stack;
+use copysl::system::paste_action;
 
 mod ui;
 
@@ -31,13 +32,9 @@ static mut CLIPBOARD_OBSERVER: Lazy<ClipboardObserver> = Lazy::new(|| {
     }
 });
 
+
 fn main() {
-    // let mut clipboard_observer = match Clipboard::new() {
-    //     Ok(good_clipboard) => {
-    //         ClipboardObserver::new_with_clipboard(good_clipboard)
-    //     }
-    //     Err(err) => { panic!("Failed to observe clipboard, nested error is {}", err) }
-    // };
+    paste_action();
 
 
     let app = app::App::default().with_scheme(app::Scheme::Plastic);
@@ -78,29 +75,14 @@ fn main() {
                 for (i, cb) in CLIPBOARD_STACK.collection.iter().enumerate() {
                     let scroll_y = scroll.yposition();
                     let mut td_element: TextDisplay = if i == 0 {
-                        TextDisplay::new(0, 0-scroll_y, w, height, None)
+                        TextDisplay::new(0, 0 - scroll_y, w, height, None)
                     } else {
-                        TextDisplay::new(0, 0-scroll_y, w, height, None).below_of(DISPLAY_VEC.get(i - 1).unwrap(), 3)
+                        TextDisplay::new(0, 0 - scroll_y, w, height, None).below_of(DISPLAY_VEC.get(i - 1).unwrap(), 3)
                     };
-                    td_element.handle(move |td: &mut TextDisplay, event: Event| {
+                    td_element.handle( |td: &mut TextDisplay, event: Event| {
                         if event == Event::Push {
-                            my_window.
-                            let mut cb = match Clipboard::new() {
-                                Ok(good_clipboard) => {
-                                    good_clipboard
-                                }
-                                Err(err) => {
-                                    println!("Failed to observe clipboard, nested error is {}", err);
-                                    return true;
-                                }
-                            };
-
-                            // clipboard_observer.clipboard.set_text(
                             let text = td.buffer().expect("The content shall sure be existed").text();
-
-                            match cb.set_text(
-                                text
-                            ) {
+                            match CLIPBOARD_OBSERVER.clipboard.set_text(text) {
                                 Ok(_) => {
                                     // CLIPBOARD_STACK.push(text);
                                 }

@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::fmt::Debug;
 use std::path::Display;
+use std::rc::Rc;
 use arboard::{Clipboard, Error};
 
 use fltk::{app, prelude::*, text, window::Window};
@@ -13,6 +15,7 @@ use fltk::text::{Cursor, TextDisplay, TextEditor};
 use fltk::widget::Widget;
 use fltk_sys::fl;
 use once_cell::sync::Lazy;
+use uinput::Device;
 
 use copysl::clipboard_utils::ClipboardObserver;
 use copysl::stack::Stack;
@@ -33,26 +36,28 @@ static mut CLIPBOARD_OBSERVER: Lazy<ClipboardObserver> = Lazy::new(|| {
 });
 
 
+
 fn main() {
-    paste_action();
 
 
     let app = app::App::default().with_scheme(app::Scheme::Plastic);
 
     let (w, h): (i32, i32) = adapted_window_size_wh();
-    let mut my_window = Window::new(100, 100, w, h, "My Window");
+    let mut my_window = Rc::new(RefCell::new(Window::new(100, 100, w, h, "My Window")));
+
 
 
     let mut scroll = Scroll::new(0, 0, w, h + 7, None);
     scroll.set_scrollbar_size(7);
 
 
-    my_window.end();
-    my_window.show();
-    let mut total_height = 0;
-
+    my_window.borrow().end();
+    my_window.borrow_mut().show();
     // app.run().unwrap()
+    let my_window_own = my_window.to_owned();
     while app.wait() {
+
+        
         unsafe {
             CLIPBOARD_OBSERVER.observe(&mut |last_content| {
                 println!("+++++++{:#?}", last_content);
@@ -71,6 +76,7 @@ fn main() {
                 }
 
                 DISPLAY_VEC.clear();
+
                 let height = ((h - 10) as f32 / 5.0).round() as i32;
                 for (i, cb) in CLIPBOARD_STACK.collection.iter().enumerate() {
                     let scroll_y = scroll.yposition();
@@ -79,12 +85,20 @@ fn main() {
                     } else {
                         TextDisplay::new(0, 0 - scroll_y, w, height, None).below_of(DISPLAY_VEC.get(i - 1).unwrap(), 3)
                     };
-                    td_element.handle( |td: &mut TextDisplay, event: Event| {
+
+
+                    let my_window_clone = Rc::clone(&my_window_own);
+                   
+                    td_element.handle( move |td: &mut TextDisplay, event: Event| {
+
                         if event == Event::Push {
+                            //TODO verify right click or left click
                             let text = td.buffer().expect("The content shall sure be existed").text();
                             match CLIPBOARD_OBSERVER.clipboard.set_text(text) {
                                 Ok(_) => {
                                     // CLIPBOARD_STACK.push(text);
+                                    paste_action();
+                                    my_window_clone.try_borrow_mut().expect("The window shall be existed").iconize();
                                 }
                                 Err(err) => { println!("Error while clicking on a existed content, nested error is {}", err) }
                             }
@@ -115,7 +129,7 @@ fn main() {
                     DISPLAY_VEC.push(td_element);
                 }
                 scroll.end();
-                my_window.redraw();
+                my_window.try_borrow_mut().expect("The window shall be existed").redraw();
             });
         }
     };

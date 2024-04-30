@@ -1,9 +1,6 @@
 use std::any::Any;
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::thread;
-use fltk::prelude::WindowExt;
-use fltk::window::DoubleWindow;
+
 use once_cell::unsync::Lazy;
 use uinput::Device;
 use uinput::event::keyboard;
@@ -28,24 +25,19 @@ pub fn paste_action(
     // let mut window = ref_window.unwrap();
 
     unsafe {
-        println!("+++++{:#?}", DEVICE.type_id());
-            println!("===========================================");
-            println!("+++++----{:#?}", DEVICE.type_id());
-            // window.iconize();
-            DEVICE.press(&keyboard::Key::LeftAlt).unwrap();
-            DEVICE.press(&keyboard::Key::Tab).unwrap();
+        // window.iconize();
+        DEVICE.press(&keyboard::Key::LeftAlt).unwrap();
+        DEVICE.press(&keyboard::Key::Tab).unwrap();
         DEVICE.synchronize().unwrap();
-            DEVICE.release(&keyboard::Key::LeftAlt).unwrap();
-            DEVICE.release(&keyboard::Key::Tab).unwrap();
+        DEVICE.release(&keyboard::Key::LeftAlt).unwrap();
+        DEVICE.release(&keyboard::Key::Tab).unwrap();
         DEVICE.synchronize().unwrap();
-            thread::sleep(std::time::Duration::from_millis(50));
-            DEVICE.press(&keyboard::Key::LeftControl).unwrap();
-            DEVICE.press(&keyboard::Key::V).unwrap();
+        thread::sleep(std::time::Duration::from_millis(50));
+        DEVICE.press(&keyboard::Key::LeftControl).unwrap();
+        DEVICE.press(&keyboard::Key::V).unwrap();
         DEVICE.synchronize().unwrap();
-        println!("+++++++++++++++++++++++++++++++++++++++++++");
-            DEVICE.release(&keyboard::Key::LeftControl).unwrap();
-            DEVICE.release(&keyboard::Key::V).unwrap();
-            DEVICE.synchronize().unwrap();
-
+        DEVICE.release(&keyboard::Key::LeftControl).unwrap();
+        DEVICE.release(&keyboard::Key::V).unwrap();
+        DEVICE.synchronize().unwrap();
     }
 }

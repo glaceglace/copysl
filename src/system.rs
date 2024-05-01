@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::thread;
 
 use once_cell::unsync::Lazy;

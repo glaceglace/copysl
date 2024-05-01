@@ -1,7 +1,4 @@
 pub mod system;
-mod inputs;
-
-use crate::clipboard_utils::ClipboardObserver;
 
 pub mod clipboard_utils {
     use arboard::{Clipboard, Error};
@@ -61,11 +58,11 @@ pub mod clipboard_utils {
 
 pub mod stack {
     use std::fmt::{Debug, Formatter};
-    use std::vec::IntoIter;
 
     pub struct Stack<T> {
         pub collection: Vec<T>,
     }
+
     impl<T: Debug> Debug for Stack<T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
             Debug::fmt(&self.collection, f)
@@ -77,14 +74,15 @@ pub mod stack {
             Self::new()
         }
     }
-impl<T> Iterator for Stack<T>{
-    type Item = T;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.pop()
+    impl<T> Iterator for Stack<T> {
+        type Item = T;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.pop()
+        }
     }
-}
-    
+
     impl<T> Stack<T> {
         pub fn new() -> Self {
             Stack {
@@ -110,10 +108,10 @@ impl<T> Iterator for Stack<T>{
         pub fn len(&self) -> usize {
             self.collection.len()
         }
-        pub fn clear(&mut self){
+        pub fn clear(&mut self) {
             self.collection.clear();
         }
-        pub fn get(&mut self, idx:usize)->Option<&T>{
+        pub fn get(&mut self, idx: usize) -> Option<&T> {
             self.collection.get(idx)
         }
     }
@@ -152,6 +150,7 @@ mod stack_tests {
 #[cfg(test)]
 mod clipboard_observer_tests {
     use arboard::Clipboard;
+
     use super::ClipboardObserver;
 
     #[test]

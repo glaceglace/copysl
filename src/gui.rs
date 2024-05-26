@@ -6,7 +6,7 @@ use fltk::group::Scroll;
 use fltk::text::TextDisplay;
 use fltk::window::DoubleWindow;
 
-use copysl::system::paste_action;
+use copysl::clipboard_obs::paste_action;
 
 use crate::{CLIPBOARD_OBSERVER, CLIPBOARD_STACK, ClipBoardElement, DISPLAY_VEC};
 

@@ -1,6 +1,6 @@
 use std::env;
 use std::fmt::Debug;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc, Mutex};
 use std::sync::mpsc::{Receiver, Sender};
 
 use arboard::Clipboard;
@@ -8,6 +8,8 @@ use fltk::{app, prelude::*};
 use fltk::app::App;
 use fltk::text::TextDisplay;
 use once_cell::sync::Lazy;
+use uinput::event::keyboard::Misc::Mute;
+use x11::xlib::{Display, XGetInputFocus, XOpenDisplay, XQueryPointer};
 
 use copysl::clipboard_utils::ClipboardObserver;
 use copysl::stack::Stack;
@@ -30,7 +32,6 @@ static mut CLIPBOARD_OBSERVER: Lazy<ClipboardObserver> = Lazy::new(|| {
 });
 static APP: Lazy<App> = Lazy::new(|| { App::default().with_scheme(app::Scheme::Plastic) });
 
-
 fn main() {
     // Verify root privilege
     if (env::var("USER").unwrap()) != "root" { panic!("Copysl needs root privileges to know shortcut is pressed when it is running in background.") }
@@ -41,6 +42,11 @@ fn main() {
     // Prepare application daemon
     // daemonization::daemonize();
 
+    // X11 Display
+    let display = unsafe { XOpenDisplay(std::ptr::null()) };
+
+    
+
     // Prepare window and its widgets
     let (w, h, mut my_window, mut scroll) = gui::prepare_gui();
 
@@ -48,13 +54,14 @@ fn main() {
 
     while APP.wait() {
         let mut visible = my_window.visible();
-        keyboard_obs::wait_for_key_press(&receiver, &mut my_window, &mut visible);
+        keyboard_obs::wait_for_key_press(&receiver, &mut my_window, &mut visible, display);
         gui::app_internal_action(&w, &h, &mut my_window, &mut scroll);
     };
 
 
     println!("Exit app loop");
 }
+
 
 
 #[derive(Debug)]

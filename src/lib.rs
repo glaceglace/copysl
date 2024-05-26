@@ -1,4 +1,4 @@
-pub mod system;
+pub mod clipboard_obs;
 
 pub mod clipboard_utils {
     use arboard::{Clipboard, Error};

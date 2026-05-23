@@ -1,0 +1,19 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+config = { path = "../config" }
+eframe = { workspace = true }
+egui = { workspace = true }
+arboard = { workspace = true }
+image = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+bincode = { workspace = true }
+xcb = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

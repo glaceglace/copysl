@@ -1,0 +1,284 @@
+use std::collections::VecDeque;
+use std::sync::{Arc, RwLock};
+
+use common::{ClipboardEntry, Config, EntryId};
+
+use crate::persistence::{PersistenceCommand, PersistenceHandle};
+
+pub struct HistoryStore {
+    entries: VecDeque<ClipboardEntry>,
+    id_counter: u64,
+    config: Arc<RwLock<Config>>,
+    persistence: Option<PersistenceHandle>,
+}
+
+impl HistoryStore {
+    pub fn new(config: Arc<RwLock<Config>>, persistence: Option<PersistenceHandle>) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            id_counter: 0,
+            config,
+            persistence,
+        }
+    }
+
+    pub fn push(&mut self, mut entry: ClipboardEntry) {
+        let hash = entry.content_hash();
+        let now = std::time::SystemTime::now();
+
+        // Search for an existing entry with the same content hash.
+        if let Some(pos) = self.entries.iter().position(|e| e.content_hash() == hash) {
+            // Duplicate found: remove from current position, update timestamp, move to front.
+            let mut existing = self.entries.remove(pos).expect("position was valid");
+            existing.captured_at = now;
+            self.entries.push_front(existing.clone());
+            if let Some(p) = &self.persistence {
+                p.send(PersistenceCommand::Upsert(existing));
+            }
+        } else {
+            // New entry: assign id and prepend.
+            entry.id = EntryId(self.id_counter);
+            self.id_counter += 1;
+            entry.captured_at = now;
+
+            // Evict the last unpinned entry if over capacity.
+            let max_entries = self.config.read().map(|c| c.max_entries).unwrap_or(200);
+            if self.entries.len() >= max_entries {
+                // Find the last (oldest) unpinned entry and remove it.
+                if let Some(evict_pos) = self.entries.iter().rposition(|e| !e.pinned) {
+                    let evicted = self.entries.remove(evict_pos).expect("position was valid");
+                    if let Some(p) = &self.persistence {
+                        p.send(PersistenceCommand::Delete(evicted.id));
+                    }
+                }
+                // If all are pinned, do not evict — just insert anyway.
+            }
+
+            self.entries.push_front(entry.clone());
+            if let Some(p) = &self.persistence {
+                p.send(PersistenceCommand::Upsert(entry));
+            }
+        }
+    }
+
+    pub fn delete(&mut self, id: EntryId) {
+        if let Some(pos) = self.entries.iter().position(|e| e.id == id) {
+            self.entries.remove(pos);
+            if let Some(p) = &self.persistence {
+                p.send(PersistenceCommand::Delete(id));
+            }
+        }
+    }
+
+    pub fn pin(&mut self, id: EntryId) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.pinned = true;
+            if let Some(p) = &self.persistence {
+                p.send(PersistenceCommand::UpdatePin(id, true));
+            }
+        }
+    }
+
+    pub fn unpin(&mut self, id: EntryId) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.pinned = false;
+            if let Some(p) = &self.persistence {
+                p.send(PersistenceCommand::UpdatePin(id, false));
+            }
+        }
+    }
+
+    pub fn clear(&mut self, include_pinned: bool) {
+        if include_pinned {
+            self.entries.clear();
+        } else {
+            self.entries.retain(|e| e.pinned);
+        }
+        if let Some(p) = &self.persistence {
+            p.send(PersistenceCommand::Clear(include_pinned));
+        }
+    }
+
+    pub fn get_page(&self, offset: usize, limit: usize) -> Vec<ClipboardEntry> {
+        // Build sorted view: pinned entries first (in VecDeque order),
+        // then unpinned entries (in VecDeque order, newest-first).
+        let pinned: Vec<&ClipboardEntry> = self.entries.iter().filter(|e| e.pinned).collect();
+        let unpinned: Vec<&ClipboardEntry> = self.entries.iter().filter(|e| !e.pinned).collect();
+
+        pinned
+            .into_iter()
+            .chain(unpinned)
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn load_initial(&mut self, entries: Vec<ClipboardEntry>) {
+        self.entries = VecDeque::from(entries);
+        self.id_counter = self
+            .entries
+            .iter()
+            .map(|e| e.id.0)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::ContentPayload;
+
+    fn make_entry(text: &str) -> ClipboardEntry {
+        ClipboardEntry {
+            id: EntryId(0),
+            payload: ContentPayload::PlainText(text.to_string()),
+            captured_at: std::time::SystemTime::now(),
+            pinned: false,
+        }
+    }
+
+    fn default_store() -> HistoryStore {
+        let config = Arc::new(RwLock::new(Config::default()));
+        HistoryStore::new(config, None)
+    }
+
+    fn store_with_max(max_entries: usize) -> HistoryStore {
+        let config = Arc::new(RwLock::new(Config {
+            max_entries,
+            ..Config::default()
+        }));
+        HistoryStore::new(config, None)
+    }
+
+    #[test]
+    fn push_deduplicates() {
+        let mut store = default_store();
+        store.push(make_entry("hello"));
+        let first_id = store.get_page(0, 1)[0].id;
+
+        store.push(make_entry("hello"));
+        let page = store.get_page(0, 100);
+
+        assert_eq!(page.len(), 1, "duplicate should not create a second entry");
+        assert_eq!(page[0].id, first_id, "id should be preserved after dedup");
+    }
+
+    #[test]
+    fn push_evicts_oldest_unpinned() {
+        let mut store = store_with_max(2);
+        store.push(make_entry("a"));
+        store.push(make_entry("b"));
+        store.push(make_entry("c"));
+
+        let page = store.get_page(0, 100);
+        assert_eq!(page.len(), 2, "should only keep max_entries entries");
+
+        let texts: Vec<&str> = page
+            .iter()
+            .map(|e| match &e.payload {
+                ContentPayload::PlainText(t) => t.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            !texts.contains(&"a"),
+            "\"a\" (oldest) should have been evicted"
+        );
+    }
+
+    #[test]
+    fn push_never_evicts_pinned() {
+        let mut store = store_with_max(2);
+        store.push(make_entry("a"));
+        let id_a = store.get_page(0, 1)[0].id;
+        store.pin(id_a);
+
+        store.push(make_entry("b"));
+        store.push(make_entry("c"));
+
+        let page = store.get_page(0, 100);
+        let has_a = page.iter().any(|e| e.id == id_a);
+        assert!(has_a, "pinned entry \"a\" should never be evicted");
+    }
+
+    #[test]
+    fn get_page_ordering() {
+        let mut store = default_store();
+        store.push(make_entry("b")); // pushed first, older
+        store.push(make_entry("a")); // pushed second, newer — newest unpinned
+
+        // Pin "b" (it is at position 1 in the deque since "a" is at front)
+        let id_b = store
+            .get_page(0, 100)
+            .iter()
+            .find(|e| matches!(&e.payload, ContentPayload::PlainText(t) if t == "b"))
+            .expect("b should exist")
+            .id;
+        store.pin(id_b);
+
+        let page = store.get_page(0, 100);
+        assert_eq!(page.len(), 2);
+        // Pinned "b" should come first.
+        assert_eq!(page[0].id, id_b, "pinned entry should be first");
+        assert!(page[0].pinned);
+        assert!(!page[1].pinned);
+    }
+
+    #[test]
+    fn clear_false_retains_pinned() {
+        let mut store = default_store();
+        store.push(make_entry("a"));
+        store.push(make_entry("b"));
+        let id_b = store.get_page(0, 1)[0].id; // "b" is at front (newest)
+        store.pin(id_b);
+
+        store.clear(false);
+
+        let page = store.get_page(0, 100);
+        assert_eq!(page.len(), 1, "only the pinned entry should remain");
+        assert_eq!(page[0].id, id_b);
+    }
+
+    #[test]
+    fn clear_true_removes_all() {
+        let mut store = default_store();
+        store.push(make_entry("a"));
+        store.push(make_entry("b"));
+        let id_b = store.get_page(0, 1)[0].id;
+        store.pin(id_b);
+
+        store.clear(true);
+
+        assert!(
+            store.get_page(0, 100).is_empty(),
+            "all entries should be removed"
+        );
+    }
+
+    #[test]
+    fn delete_removes_by_id() {
+        let mut store = default_store();
+        store.push(make_entry("a")); // id 0
+        store.push(make_entry("b")); // id 1
+
+        let id_a = store
+            .get_page(0, 100)
+            .iter()
+            .find(|e| matches!(&e.payload, ContentPayload::PlainText(t) if t == "a"))
+            .expect("a should exist")
+            .id;
+
+        store.delete(id_a);
+
+        let page = store.get_page(0, 100);
+        assert_eq!(page.len(), 1, "only one entry should remain");
+        assert!(
+            page.iter().all(|e| e.id != id_a),
+            "deleted entry should not be present"
+        );
+    }
+}

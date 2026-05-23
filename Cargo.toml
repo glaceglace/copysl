@@ -1,0 +1,40 @@
+[workspace]
+members = [
+    "crates/common",
+    "crates/config",
+    "crates/daemon",
+    "crates/ui",
+]
+resolver = "2"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+tokio = { version = "1", features = ["full"] }
+eframe = "0.34"
+egui = "0.34"
+arboard = "3"
+rusqlite = { version = "0.31", features = ["bundled"] }
+toml = "0.8"
+xcb = { version = "1", features = ["xtest"] }
+notify-rust = "4"
+sha2 = "0.10"
+dirs = "5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+anyhow = "1"
+thiserror = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[package]
+name = "copieur"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "copieur"
+path = "src/main.rs"
+
+[dependencies]
+daemon = { path = "crates/daemon" }
+ui = { path = "crates/ui" }

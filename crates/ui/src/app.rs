@@ -144,6 +144,7 @@ impl CopieurApp {
             CardListAction::Delete(id) => {
                 self.send_ipc(DaemonRequest::DeleteEntry { id });
                 self.entries.retain(|e| e.id != id);
+                self.card_list.evict_texture(id);
                 self.refilter();
             }
             CardListAction::Pin(id) => {
@@ -375,59 +376,91 @@ impl CopieurApp {
     }
 }
 
-/// Load a system sans-serif font as the primary proportional font.
+/// Configure fonts and interaction style.
 ///
-/// egui's bundled Ubuntu-Light covers only Latin glyphs, so symbols like
-/// `←` (U+2190) and `≡` (U+2261) are missing.  A system font such as DejaVu
-/// Sans or Liberation Sans covers these ranges and is present on virtually all
-/// Linux distributions.  The function tries a prioritised list of known paths
-/// and silently no-ops when none are found (egui's bundled fonts remain active).
+/// Two system fonts are loaded when available:
+///
+/// 1. A sans-serif font (DejaVu / Liberation / Noto Sans / FreeSans) placed
+///    first in the Proportional family so that symbols like `←` and `≡` render
+///    correctly.  egui's bundled Ubuntu-Light lacks these codepoints.
+///
+/// 2. A monochrome emoji font (NotoEmoji-Regular from the system) placed right
+///    after the sans font.  This may cover more emoji than egui's bundled copy.
+///    Colour emoji fonts (CBDT/CBLC) are not supported by egui's renderer.
+///
+/// If neither is found the function falls through and `ctx.set_fonts` is still
+/// called with the default definitions (no-op equivalent, but consistent).
 pub fn setup_fonts(ctx: &egui::Context) {
-    let candidates: &[&str] = &[
-        // DejaVu Sans — ships by default on most distros
+    let mut fonts = egui::FontDefinitions::default();
+
+    // ── 1. System sans-serif ─────────────────────────────────────────────────
+    let sans_candidates: &[&str] = &[
         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",       // Fedora / RHEL
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",         // Debian / Ubuntu
         "/usr/share/fonts/TTF/DejaVuSans.ttf",                     // Arch Linux
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",                  // openSUSE / generic
         "/usr/share/fonts/dejavu-fonts/DejaVuSans.ttf",
-        // Liberation Sans — common on RHEL-family and many others
-        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf", // Fedora
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",   // Debian / Ubuntu
-        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",            // Arch / generic
-        // Noto Sans — increasingly the default on newer distros
-        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",        // Fedora
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",      // Debian / Ubuntu
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",               // generic
-        "/usr/share/fonts/TTF/NotoSans-Regular.ttf",                // Arch
-        // FreeSans (GNU FreeFont) — available on most distros as a fallback
+        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/TTF/NotoSans-Regular.ttf",
         "/usr/share/fonts/gnu-free/FreeSans.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
     ];
-
-    for path in candidates {
+    for path in sans_candidates {
         if let Ok(data) = std::fs::read(path) {
-            let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert(
                 "SystemSans".to_owned(),
                 std::sync::Arc::new(egui::FontData::from_owned(data)),
             );
-            // Prepend so the system font is tried first; egui's bundled fonts
-            // (NotoEmoji, emoji-icon-font) remain as fallbacks for emoji and
-            // symbols not present in the system font.
-            fonts
-                .families
+            fonts.families
                 .entry(egui::FontFamily::Proportional)
                 .or_default()
                 .insert(0, "SystemSans".to_owned());
-            ctx.set_fonts(fonts);
             break;
         }
     }
 
-    // Labels are not selectable by default so hovering over text does not show
-    // the IBeam cursor.  egui defaults this to true, which is correct for text
-    // editors but wrong for a launcher-style panel where nothing is editable.
+    // ── 2. System emoji font ─────────────────────────────────────────────────
+    let emoji_candidates: &[&str] = &[
+        "/usr/share/fonts/google-noto-emoji/NotoEmoji-Regular.ttf", // Fedora
+        "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",     // Debian / Ubuntu
+        "/usr/share/fonts/noto-emoji/NotoEmoji-Regular.ttf",
+        "/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
+        "/usr/share/fonts/TTF/NotoEmoji-Regular.ttf",               // Arch
+    ];
+    for path in emoji_candidates {
+        if let Ok(data) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "SystemEmoji".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(data)),
+            );
+            let family = fonts.families
+                .entry(egui::FontFamily::Proportional)
+                .or_default();
+            // Insert after SystemSans (index 1) if present, else at front (index 0)
+            family.insert(emoji_insert_pos(family), "SystemEmoji".to_owned());
+            break;
+        }
+    }
+
+    ctx.set_fonts(fonts);
+
+    // Labels are read-only — don't show the IBeam cursor when hovering text.
     ctx.style_mut(|s| s.interaction.selectable_labels = false);
+}
+
+/// Compute the index at which the emoji font should be inserted in the
+/// Proportional family list.
+///
+/// If `SystemSans` is already at position 0, the emoji font goes after it
+/// (position 1) so Latin text still uses the sans font first.  Otherwise the
+/// emoji font is prepended at position 0.
+pub(crate) fn emoji_insert_pos(family: &[String]) -> usize {
+    usize::from(family.first().map(|s| s == "SystemSans").unwrap_or(false))
 }
 
 /// Warm light visuals — cream-tinted so the app reads as clearly "light"
@@ -800,5 +833,84 @@ mod tests {
             focus_decision(false, false),
             FocusDecision::RequestFocus
         );
+    }
+
+    // ── emoji_insert_pos ──────────────────────────────────────────────────────
+
+    #[test]
+    fn emoji_insert_pos_empty_family_is_zero() {
+        assert_eq!(emoji_insert_pos(&[]), 0);
+    }
+
+    #[test]
+    fn emoji_insert_pos_no_system_sans_is_zero() {
+        let family: Vec<String> = vec!["Ubuntu-Light".into(), "NotoEmoji-Regular".into()];
+        assert_eq!(emoji_insert_pos(&family), 0);
+    }
+
+    #[test]
+    fn emoji_insert_pos_system_sans_first_is_one() {
+        let family: Vec<String> = vec!["SystemSans".into(), "Ubuntu-Light".into()];
+        assert_eq!(emoji_insert_pos(&family), 1);
+    }
+
+    #[test]
+    fn emoji_insert_pos_system_sans_not_first_is_zero() {
+        // SystemSans exists but is not at index 0 — emoji still goes to front
+        let family: Vec<String> = vec!["Ubuntu-Light".into(), "SystemSans".into()];
+        assert_eq!(emoji_insert_pos(&family), 0);
+    }
+
+    #[test]
+    fn emoji_insert_pos_only_system_sans_is_one() {
+        let family: Vec<String> = vec!["SystemSans".into()];
+        assert_eq!(emoji_insert_pos(&family), 1);
+    }
+
+    // ── setup_fonts ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn setup_fonts_disables_selectable_labels() {
+        let ctx = egui::Context::default();
+        setup_fonts(&ctx);
+        assert!(!ctx.style().interaction.selectable_labels);
+    }
+
+    #[test]
+    fn setup_fonts_does_not_panic() {
+        // No system fonts available in CI is fine — must not crash.
+        let ctx = egui::Context::default();
+        setup_fonts(&ctx);
+    }
+
+    #[test]
+    fn setup_fonts_emoji_goes_after_sans_in_definitions() {
+        // Simulate what setup_fonts does when both fonts are available: verify
+        // the emoji font lands at index 1 when SystemSans is already at index 0.
+        let mut fonts = egui::FontDefinitions::default();
+        let family = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+        family.insert(0, "SystemSans".to_owned());
+        let pos = emoji_insert_pos(family);
+        family.insert(pos, "SystemEmoji".to_owned());
+        assert_eq!(family[0], "SystemSans");
+        assert_eq!(family[1], "SystemEmoji");
+    }
+
+    #[test]
+    fn setup_fonts_emoji_goes_first_without_sans_in_definitions() {
+        // When no system sans was loaded, emoji is prepended at position 0.
+        let mut fonts = egui::FontDefinitions::default();
+        let family = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+        let pos = emoji_insert_pos(family);
+        family.insert(pos, "SystemEmoji".to_owned());
+        assert_eq!(family[0], "SystemEmoji");
+    }
+
+    #[test]
+    fn setup_fonts_called_twice_does_not_panic() {
+        let ctx = egui::Context::default();
+        setup_fonts(&ctx);
+        setup_fonts(&ctx); // idempotent — must not crash or deadlock
+        assert!(!ctx.style().interaction.selectable_labels);
     }
 }

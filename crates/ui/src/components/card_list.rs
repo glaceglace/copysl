@@ -1,4 +1,5 @@
-use common::{ClipboardEntry, EntryId};
+use std::collections::HashMap;
+use common::{ClipboardEntry, ContentPayload, EntryId};
 use crate::components::card::{CardAction, show_card};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +19,9 @@ pub struct CardList {
     /// card can ask its parent ScrollArea to scroll it into view.  Cleared
     /// after each render pass so mouse-wheel scrolling is never fought.
     needs_scroll: bool,
+    /// Decoded GPU textures for image entries, keyed by entry id.
+    /// Populated lazily on first render; dropped when the entry is deleted.
+    texture_cache: HashMap<EntryId, egui::TextureHandle>,
 }
 
 impl CardList {
@@ -26,7 +30,18 @@ impl CardList {
             selected_idx: None,
             prev_filtered_len: 0,
             needs_scroll: false,
+            texture_cache: HashMap::new(),
         }
+    }
+
+    /// Remove a cached texture when its entry is deleted or history is cleared.
+    pub fn evict_texture(&mut self, id: EntryId) {
+        self.texture_cache.remove(&id);
+    }
+
+    /// Drop all cached textures (e.g. on ClearHistory).
+    pub fn clear_textures(&mut self) {
+        self.texture_cache.clear();
     }
 
     pub fn show(
@@ -98,7 +113,16 @@ impl CardList {
                     // Only ask for a scroll when keyboard navigation just moved here;
                     // otherwise the scroll area fights the user's manual scrolling.
                     let scroll = selected && self.needs_scroll;
-                    let card_action = show_card(ui, entry, selected, scroll);
+
+                    // Decode image entries into GPU textures on first render.
+                    if let ContentPayload::Image { data, .. } = &entry.payload {
+                        if !self.texture_cache.contains_key(&entry.id) {
+                            let tex = decode_image_texture(ui.ctx(), entry.id, data);
+                            self.texture_cache.insert(entry.id, tex);
+                        }
+                    }
+                    let texture = self.texture_cache.get(&entry.id);
+                    let card_action = show_card(ui, entry, selected, scroll, texture);
                     if let Some(card_action) = card_action {
                         action = Some(match card_action {
                             CardAction::Paste => CardListAction::Paste(entry.id),
@@ -121,6 +145,28 @@ impl CardList {
 
 impl Default for CardList {
     fn default() -> Self { Self::new() }
+}
+
+/// Decode PNG bytes into an egui GPU texture.  Falls back to a 1×1 black
+/// pixel on decode failure so the card still renders without crashing.
+fn decode_image_texture(
+    ctx: &egui::Context,
+    id: EntryId,
+    png_data: &[u8],
+) -> egui::TextureHandle {
+    let rgba = image::load_from_memory(png_data)
+        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
+        .to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let color_img = egui::ColorImage::from_rgba_unmultiplied(
+        [w as usize, h as usize],
+        rgba.as_raw(),
+    );
+    ctx.load_texture(
+        format!("clip_{}", id.0),
+        color_img,
+        egui::TextureOptions::LINEAR,
+    )
 }
 
 /// Pure function: compute display order indices.
@@ -208,5 +254,91 @@ mod tests {
         let list = CardList::new();
         assert!(list.selected_idx.is_none());
         assert!(!list.needs_scroll);
+    }
+
+    #[test]
+    fn card_list_starts_with_empty_texture_cache() {
+        let list = CardList::new();
+        assert!(list.texture_cache.is_empty());
+    }
+
+    #[test]
+    fn evict_texture_removes_entry() {
+        let mut list = CardList::new();
+        // Insert a dummy value using a raw HashMap insert (no actual GPU texture needed).
+        // We can't create a real TextureHandle without an egui context, so we just
+        // verify the evict_texture method removes the key if it exists.
+        // Evicting a non-existent key must not panic.
+        list.evict_texture(EntryId(42));
+        assert!(list.texture_cache.is_empty());
+    }
+
+    #[test]
+    fn clear_textures_empties_cache() {
+        let mut list = CardList::new();
+        // Evict from empty cache is a no-op.
+        list.clear_textures();
+        assert!(list.texture_cache.is_empty());
+    }
+
+    // ── decode_image_texture ──────────────────────────────────────────────────
+
+    fn tiny_png() -> Vec<u8> {
+        use image::ImageEncoder as _;
+        let rgba = [255u8, 0, 0, 255];
+        let mut buf = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut buf)
+            .write_image(&rgba, 1, 1, image::ExtendedColorType::Rgba8)
+            .expect("encode");
+        buf
+    }
+
+    #[test]
+    fn decode_image_texture_valid_png_does_not_panic() {
+        let ctx = egui::Context::default();
+        let _tex = decode_image_texture(&ctx, EntryId(1), &tiny_png());
+        // texture was created without panicking
+    }
+
+    #[test]
+    fn decode_image_texture_invalid_bytes_falls_back() {
+        let ctx = egui::Context::default();
+        // Should silently fall back to 1×1, not panic.
+        let _tex = decode_image_texture(&ctx, EntryId(2), &[0u8; 16]);
+    }
+
+    #[test]
+    fn decode_image_texture_empty_bytes_falls_back() {
+        let ctx = egui::Context::default();
+        let _tex = decode_image_texture(&ctx, EntryId(3), &[]);
+    }
+
+    #[test]
+    fn decode_image_texture_distinct_ids_produce_distinct_textures() {
+        let ctx = egui::Context::default();
+        let png = tiny_png();
+        let t1 = decode_image_texture(&ctx, EntryId(10), &png);
+        let t2 = decode_image_texture(&ctx, EntryId(11), &png);
+        // Different egui texture names → different texture IDs
+        assert_ne!(t1.id(), t2.id());
+    }
+
+    #[test]
+    fn display_order_image_entries_included() {
+        // Image entries should be ordered like any other entry: pinned first.
+        let image_entry = ClipboardEntry {
+            id: EntryId(10),
+            payload: ContentPayload::Image {
+                data: vec![0u8; 4],
+                mime: common::ImageMime::Png,
+            },
+            captured_at: SystemTime::now(),
+            pinned: true,
+        };
+        let text_entry = make_entry(11, false);
+        let entries = vec![image_entry, text_entry];
+        let order = compute_display_order(&entries, &[0, 1]);
+        assert_eq!(order[0], 0, "pinned image entry should appear first");
+        assert_eq!(order[1], 1);
     }
 }

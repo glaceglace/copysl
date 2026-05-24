@@ -12,6 +12,33 @@ pub enum CardAction {
     Copy,
 }
 
+/// Pure function: compute the display lines for a plain-text preview.
+///
+/// Returns at most `max_lines` strings.  If the source text has more lines
+/// than `max_lines`, the last returned element is `"…"`.
+pub fn preview_lines(text: &str, max_lines: usize) -> Vec<String> {
+    if max_lines == 0 {
+        return vec![];
+    }
+    let mut result = Vec::with_capacity(max_lines);
+    let mut iter = text.lines();
+    loop {
+        match iter.next() {
+            None => break,
+            Some(line) => {
+                if result.len() + 1 < max_lines {
+                    result.push(line.to_string());
+                } else {
+                    let has_more = iter.next().is_some();
+                    result.push(if has_more { "\u{2026}".to_string() } else { line.to_string() });
+                    break;
+                }
+            }
+        }
+    }
+    result
+}
+
 /// Pure function: format relative time. Testable without egui.
 pub fn format_relative_time(age: Duration) -> String {
     let secs = age.as_secs();
@@ -33,11 +60,13 @@ pub fn format_relative_time(age: Duration) -> String {
 ///
 /// `selected`     — keyboard-selected (highlighted background + 2 px accent border).
 /// `scroll_to_me` — when true the containing ScrollArea scrolls to show this card.
+/// `texture`      — pre-decoded GPU texture for `Image` entries; `None` for text.
 pub fn show_card(
     ui: &mut egui::Ui,
     entry: &ClipboardEntry,
     selected: bool,
     scroll_to_me: bool,
+    texture: Option<&egui::TextureHandle>,
 ) -> Option<CardAction> {
     let mut action = None;
 
@@ -77,14 +106,14 @@ pub fn show_card(
         ui.horizontal(|ui| {
             // ── Text preview column ───────────────────────────────────────
             ui.vertical(|ui| {
-                ui.set_min_width(text_w);
+                ui.set_width(text_w);
                 ui.set_min_height(content_height);
                 match &entry.payload {
                     ContentPayload::PlainText(text) => {
-                        let preview: String =
-                            text.lines().take(3).collect::<Vec<_>>().join("\n");
-                        let lbl = ui.add(egui::Label::new(&preview).truncate());
-                        lbl.on_hover_text(text.as_str());
+                        for line in preview_lines(text, 4) {
+                            ui.add(egui::Label::new(line).truncate())
+                                .on_hover_text(text.as_str());
+                        }
                     }
                     ContentPayload::RichText { plain_preview, .. } => {
                         let lbl = ui.add(
@@ -97,56 +126,28 @@ pub fn show_card(
                         );
                     }
                     ContentPayload::Image { .. } => {
-                        ui.label("[Image]");
+                        if let Some(tex) = texture {
+                            let [tw, th] = tex.size();
+                            let (tw, th) = (tw as f32, (th as f32).max(1.0));
+                            let scale = (text_w / tw).min(content_height / th);
+                            let sized = egui::load::SizedTexture::new(
+                                tex.id(),
+                                egui::vec2(tw * scale, th * scale),
+                            );
+                            ui.add(egui::Image::new(sized));
+                        } else {
+                            ui.label("[Image]");
+                        }
                     }
                 }
             });
 
-            // ── Metadata + actions column (right) ─────────────────────────
+            // ── Metadata column (right) — timestamp only ──────────────────
+            // Buttons have been moved to a floating overlay so they never
+            // shift the timestamp or text-preview columns.
             ui.vertical(|ui| {
-                ui.set_min_width(meta_w);
-
-                // Row 1: timestamp (left) + delete button (right, hover-only)
+                ui.set_width(meta_w);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    if is_card_hovered {
-                        let btn_size = egui::vec2(16.0, 16.0);
-                        let (rect, btn_resp) =
-                            ui.allocate_exact_size(btn_size, egui::Sense::click());
-                        delete_btn_rect = Some(rect);
-
-                        // Red-cross button: transparent bg, red border, red X
-                        let red = egui::Color32::from_rgb(200, 60, 60);
-                        let bg = if btn_resp.hovered() {
-                            egui::Color32::from_rgba_unmultiplied(200, 60, 60, 30)
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        };
-                        ui.painter().rect_filled(rect, egui::CornerRadius::same(3), bg);
-                        ui.painter().rect_stroke(
-                            rect,
-                            egui::CornerRadius::same(3),
-                            egui::Stroke::new(1.0, red),
-                            egui::StrokeKind::Middle,
-                        );
-                        let m = 4.0_f32;
-                        let stroke = egui::Stroke::new(1.5, red);
-                        ui.painter().line_segment(
-                            [rect.min + egui::vec2(m, m), rect.max - egui::vec2(m, m)],
-                            stroke,
-                        );
-                        ui.painter().line_segment(
-                            [
-                                egui::pos2(rect.max.x - m, rect.min.y + m),
-                                egui::pos2(rect.min.x + m, rect.max.y - m),
-                            ],
-                            stroke,
-                        );
-
-                        if btn_resp.clicked() {
-                            action = Some(CardAction::Delete);
-                        }
-                    }
-
                     let age = entry.captured_at.elapsed().unwrap_or(Duration::ZERO);
                     ui.add(
                         egui::Label::new(
@@ -157,60 +158,6 @@ pub fn show_card(
                         .truncate(),
                     );
                 });
-
-                // Row 2: pin button (right-aligned; shown on hover or when already pinned)
-                if is_card_hovered || entry.pinned {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                        let pin_size = egui::vec2(16.0, 16.0);
-                        let (rect, pin_resp) =
-                            ui.allocate_exact_size(pin_size, egui::Sense::click());
-                        pin_btn_rect = Some(rect);
-
-                        let [ar, ag, ab, _] = visuals.selection.stroke.color.to_array();
-                        let pin_color = if entry.pinned {
-                            visuals.selection.stroke.color
-                        } else {
-                            egui::Color32::from_rgba_unmultiplied(ar, ag, ab, 160)
-                        };
-                        let bg = if entry.pinned {
-                            egui::Color32::from_rgba_unmultiplied(ar, ag, ab, 35)
-                        } else if pin_resp.hovered() {
-                            egui::Color32::from_rgba_unmultiplied(ar, ag, ab, 20)
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        };
-                        ui.painter().rect_filled(rect, egui::CornerRadius::same(3), bg);
-                        ui.painter().rect_stroke(
-                            rect,
-                            egui::CornerRadius::same(3),
-                            egui::Stroke::new(1.0, pin_color),
-                            egui::StrokeKind::Middle,
-                        );
-
-                        // Draw a thumbtack: filled circle head + vertical shaft
-                        let cx = rect.center().x;
-                        ui.painter().circle_filled(
-                            egui::pos2(cx, rect.top() + 4.5),
-                            2.5,
-                            pin_color,
-                        );
-                        ui.painter().line_segment(
-                            [
-                                egui::pos2(cx, rect.top() + 7.5),
-                                egui::pos2(cx, rect.bottom() - 2.0),
-                            ],
-                            egui::Stroke::new(1.5, pin_color),
-                        );
-
-                        if pin_resp.clicked() {
-                            action = if entry.pinned {
-                                Some(CardAction::Unpin)
-                            } else {
-                                Some(CardAction::Pin)
-                            };
-                        }
-                    });
-                }
             });
         });
     });
@@ -256,6 +203,92 @@ pub fn show_card(
             egui::CornerRadius::same(2),
             visuals.selection.stroke.color,
         );
+    }
+
+    // ── Floating button overlay (bottom-left corner, only when hovered) ──────
+    // Buttons are painted over the card using ui.interact() so they never
+    // allocate layout space and cannot shift the timestamp or text columns.
+    if is_card_hovered {
+        let btn_size = egui::vec2(16.0, 16.0);
+        let margin = SPACE_M;
+        let del_origin = egui::pos2(
+            interact.rect.left() + margin,
+            interact.rect.bottom() - btn_size.y - margin,
+        );
+        let del_rect = egui::Rect::from_min_size(del_origin, btn_size);
+
+        let del_resp = ui.interact(
+            del_rect,
+            egui::Id::new(entry.id).with("del"),
+            egui::Sense::click(),
+        );
+        delete_btn_rect = Some(del_rect);
+
+        // Paint delete button: transparent fill, red border, red X
+        let del_red = egui::Color32::from_rgb(200, 60, 60);
+        let del_fill = egui::Color32::from_rgba_unmultiplied(200, 60, 60, 20);
+        ui.painter().rect(
+            del_rect,
+            egui::CornerRadius::same(3),
+            del_fill,
+            egui::Stroke::new(1.0, del_red),
+            egui::StrokeKind::Middle,
+        );
+        let pad = 4.0;
+        let p = ui.painter();
+        p.line_segment(
+            [del_rect.min + egui::vec2(pad, pad), del_rect.max - egui::vec2(pad, pad)],
+            egui::Stroke::new(1.5, del_red),
+        );
+        p.line_segment(
+            [egui::pos2(del_rect.max.x - pad, del_rect.min.y + pad),
+             egui::pos2(del_rect.min.x + pad, del_rect.max.y - pad)],
+            egui::Stroke::new(1.5, del_red),
+        );
+
+        if del_resp.clicked() {
+            action = Some(CardAction::Delete);
+        }
+
+        // Pin button: immediately to the right of the delete button
+        let pin_origin = egui::pos2(del_rect.right() + 4.0, del_rect.top());
+        let pin_rect = egui::Rect::from_min_size(pin_origin, btn_size);
+
+        let pin_resp = ui.interact(
+            pin_rect,
+            egui::Id::new(entry.id).with("pin"),
+            egui::Sense::click(),
+        );
+        pin_btn_rect = Some(pin_rect);
+
+        // Paint pin button: accent color when pinned, muted otherwise
+        let pin_color = if entry.pinned {
+            visuals.selection.stroke.color
+        } else {
+            visuals.widgets.inactive.fg_stroke.color
+        };
+        let pin_fill = egui::Color32::from_rgba_unmultiplied(
+            pin_color.r(), pin_color.g(), pin_color.b(), 20,
+        );
+        ui.painter().rect(
+            pin_rect,
+            egui::CornerRadius::same(3),
+            pin_fill,
+            egui::Stroke::new(1.0, pin_color),
+            egui::StrokeKind::Middle,
+        );
+        // Draw thumbtack: circle head at top-center, vertical shaft below
+        let cx = pin_rect.center().x;
+        let head_y = pin_rect.min.y + 5.0;
+        ui.painter().circle_filled(egui::pos2(cx, head_y), 3.0, pin_color);
+        ui.painter().line_segment(
+            [egui::pos2(cx, head_y + 3.0), egui::pos2(cx, pin_rect.max.y - 2.0)],
+            egui::Stroke::new(1.5, pin_color),
+        );
+
+        if pin_resp.clicked() {
+            action = Some(if entry.pinned { CardAction::Unpin } else { CardAction::Pin });
+        }
     }
 
     // Scroll the containing ScrollArea to show this card when keyboard
@@ -322,6 +355,62 @@ pub(crate) fn route_card_click(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── preview_lines ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn preview_lines_empty_text() {
+        assert!(preview_lines("", 4).is_empty());
+    }
+
+    #[test]
+    fn preview_lines_single_line() {
+        assert_eq!(preview_lines("hello", 4), vec!["hello"]);
+    }
+
+    #[test]
+    fn preview_lines_exactly_four_lines_no_ellipsis() {
+        let text = "a\nb\nc\nd";
+        let got = preview_lines(text, 4);
+        assert_eq!(got, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn preview_lines_five_lines_shows_ellipsis_on_fourth() {
+        let text = "a\nb\nc\nd\ne";
+        let got = preview_lines(text, 4);
+        assert_eq!(got, vec!["a", "b", "c", "\u{2026}"]);
+    }
+
+    #[test]
+    fn preview_lines_many_lines_caps_at_max() {
+        let text = (0..20).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let got = preview_lines(&text, 4);
+        assert_eq!(got.len(), 4);
+        assert_eq!(got[3], "\u{2026}");
+    }
+
+    #[test]
+    fn preview_lines_three_lines_no_ellipsis() {
+        let text = "x\ny\nz";
+        let got = preview_lines(text, 4);
+        assert_eq!(got, vec!["x", "y", "z"]);
+    }
+
+    #[test]
+    fn preview_lines_max_zero_returns_empty() {
+        assert!(preview_lines("a\nb\nc", 0).is_empty());
+    }
+
+    #[test]
+    fn preview_lines_max_one_single_line_no_ellipsis() {
+        assert_eq!(preview_lines("only", 1), vec!["only"]);
+    }
+
+    #[test]
+    fn preview_lines_max_one_multiline_shows_ellipsis() {
+        assert_eq!(preview_lines("a\nb", 1), vec!["\u{2026}"]);
+    }
 
     // ── Happy-path coverage ───────────────────────────────────────────────────
 

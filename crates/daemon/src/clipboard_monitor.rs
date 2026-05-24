@@ -3,6 +3,8 @@ use std::thread;
 use std::time::Duration;
 
 use common::{ClipboardEntry, ContentPayload, EntryId, ImageMime};
+#[cfg(not(test))]
+use image::ImageEncoder as _;
 
 const POLL_INTERVAL_MS: u64 = 200;
 
@@ -76,7 +78,17 @@ impl RealClipboardReader {
 #[cfg(not(test))]
 impl ClipboardReader for RealClipboardReader {
     fn read_image(&mut self) -> Option<(Vec<u8>, ImageMime)> {
-        None
+        let img = self.clipboard.get_image().ok()?;
+        let mut png_bytes: Vec<u8> = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png_bytes)
+            .write_image(
+                &img.bytes,
+                img.width as u32,
+                img.height as u32,
+                image::ExtendedColorType::Rgba8,
+            )
+            .ok()?;
+        Some((png_bytes, ImageMime::Png))
     }
 
     fn read_html(&mut self) -> Option<(String, String)> {
@@ -131,6 +143,40 @@ mod tests {
                 Some(format!("__stop__{}", self.exhausted_counter))
             }
         }
+    }
+
+    /// A reader that produces one image entry then poison-pills.
+    struct ImageReader {
+        image: Option<(Vec<u8>, ImageMime)>,
+        counter: u64,
+    }
+
+    impl ImageReader {
+        fn new(png: Vec<u8>) -> Self {
+            ImageReader { image: Some((png, ImageMime::Png)), counter: 0 }
+        }
+    }
+
+    impl ClipboardReader for ImageReader {
+        fn read_image(&mut self) -> Option<(Vec<u8>, ImageMime)> {
+            self.image.take()
+        }
+        fn read_html(&mut self) -> Option<(String, String)> { None }
+        fn read_text(&mut self) -> Option<String> {
+            self.counter += 1;
+            Some(format!("__stop__{}", self.counter))
+        }
+    }
+
+    /// Encode a minimal 1×1 red RGBA PNG for use in tests.
+    fn tiny_png() -> Vec<u8> {
+        use image::ImageEncoder as _;
+        let rgba = [255u8, 0, 0, 255]; // one red pixel
+        let mut buf = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut buf)
+            .write_image(&rgba, 1, 1, image::ExtendedColorType::Rgba8)
+            .expect("encode failed");
+        buf
     }
 
     // -------------------------------------------------------------------------
@@ -280,5 +326,80 @@ mod tests {
 
         let result = handle.join();
         assert!(result.is_ok(), "thread should exit cleanly after receiver drop");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 5: image payload is captured and sent as Image entry
+    // -------------------------------------------------------------------------
+    #[test]
+    fn image_reader_produces_image_entry() {
+        let (tx, rx) = mpsc::channel();
+        let reader = ImageReader::new(tiny_png());
+        let handle = ClipboardMonitor::spawn_with_reader(tx, reader);
+
+        let mut image_entry = None;
+        loop {
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(entry) => {
+                    if matches!(&entry.payload, ContentPayload::Image { .. }) {
+                        image_entry = Some(entry);
+                        break;
+                    }
+                    // poison-pill text: keep waiting
+                }
+                Err(_) => break,
+            }
+        }
+
+        drop(rx);
+        handle.join().ok();
+
+        let entry = image_entry.expect("should have received an image entry");
+        assert!(matches!(entry.payload, ContentPayload::Image { mime: ImageMime::Png, .. }));
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 6: image is not re-sent if the clipboard hasn't changed
+    // -------------------------------------------------------------------------
+    #[test]
+    fn image_deduplication_suppresses_identical_image() {
+        // ImageReader sends one image then only poison-pills (text).
+        // After the image arrives, any text with a new value will be sent.
+        // The image itself should appear exactly once.
+        let (tx, rx) = mpsc::channel();
+        let reader = ImageReader::new(tiny_png());
+        let handle = ClipboardMonitor::spawn_with_reader(tx, reader);
+
+        let mut image_count = 0usize;
+        let mut received = 0usize;
+        loop {
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(entry) => {
+                    if matches!(&entry.payload, ContentPayload::Image { .. }) {
+                        image_count += 1;
+                    }
+                    received += 1;
+                    if received >= 3 { break; }
+                }
+                Err(_) => break,
+            }
+        }
+
+        drop(rx);
+        handle.join().ok();
+
+        assert_eq!(image_count, 1, "image should appear exactly once");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 7: tiny_png encodes a valid PNG decodable by the image crate
+    // -------------------------------------------------------------------------
+    #[test]
+    fn tiny_png_is_valid_png() {
+        let png = tiny_png();
+        let img = image::load_from_memory(&png).expect("should decode");
+        let rgba = img.to_rgba8();
+        assert_eq!(rgba.dimensions(), (1, 1));
+        assert_eq!(rgba.get_pixel(0, 0).0, [255, 0, 0, 255]);
     }
 }

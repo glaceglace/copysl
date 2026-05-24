@@ -10,7 +10,7 @@ pub struct X11FocusTracker {
     /// The X11 window that currently has focus.
     current: Arc<Mutex<Option<u32>>>,
     /// The X11 window that had focus just before `current` — i.e. the app
-    /// that was active before Copieur opened.  Used by the paste executor to
+    /// that was active before Copysl opened.  Used by the paste executor to
     /// inject Ctrl+V directly into that window without any WM delay.
     previous: Arc<Mutex<Option<u32>>>,
 }

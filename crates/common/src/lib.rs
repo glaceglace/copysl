@@ -90,7 +90,7 @@ pub struct Config {
     pub autostart: bool,
     pub window_position: WindowPos,
     pub theme: Theme,
-    /// Wayland-only: milliseconds the daemon waits after the Copieur window
+    /// Wayland-only: milliseconds the daemon waits after the Copysl window
     /// closes before injecting Ctrl+V.  The WM must return focus to the
     /// previous app in this window.  On X11/XWayland this field is ignored
     /// because the target window is addressed directly via XSetInputFocus.

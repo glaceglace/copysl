@@ -211,7 +211,7 @@ impl SettingsPanel {
             ui.label("Wayland paste delay");
             ui.add_space(SPACE_S);
             ui.label(
-                "How long the daemon waits after the Copieur window closes before \
+                "How long the daemon waits after the Copysl window closes before \
                  injecting Ctrl+V. Only applies on Wayland. On X11/XWayland this \
                  setting is ignored — paste is always instant."
             );

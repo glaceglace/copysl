@@ -6,7 +6,7 @@ pub fn desktop_file_path() -> PathBuf {
     dirs::config_dir()
         .expect("Could not determine config directory")
         .join("autostart")
-        .join("copieur.desktop")
+        .join("copysl.desktop")
 }
 
 pub struct AutostartManager {
@@ -29,15 +29,15 @@ impl AutostartManager {
     }
 
     fn file_path(&self) -> PathBuf {
-        self.base_dir.join("copieur.desktop")
+        self.base_dir.join("copysl.desktop")
     }
 
     pub fn enable(&self) -> Result<()> {
         std::fs::create_dir_all(&self.base_dir)?;
         let exe = std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from("copieur"));
+            .unwrap_or_else(|_| PathBuf::from("copysl"));
         let content = format!(
-            "[Desktop Entry]\nType=Application\nName=Copieur\nExec={} --daemon\nHidden=false\nX-GNOME-Autostart-enabled=true\n",
+            "[Desktop Entry]\nType=Application\nName=Copysl\nExec={} --daemon\nHidden=false\nX-GNOME-Autostart-enabled=true\n",
             exe.display()
         );
         std::fs::write(self.file_path(), content)?;

@@ -2,17 +2,30 @@ use common::{Config, WindowPos};
 use eframe::NativeOptions;
 use egui::{Pos2, Vec2, ViewportBuilder};
 
-pub const WINDOW_WIDTH: f32 = 480.0;
-pub const WINDOW_HEIGHT: f32 = 680.0;
+/// Compute the logical window size from the screen resolution.
+///
+/// Width  ≈ 28 % of screen width,  clamped to [360, 600].
+/// Height ≈ 65 % of screen height, clamped to [480, 860].
+///
+/// When `screen_size` is `None` the function falls back to 1920 × 1080.
+pub fn compute_window_size(screen_size: Option<(u32, u32)>) -> (f32, f32) {
+    let (sw, sh) = screen_size
+        .map(|(w, h)| (w as f32, h as f32))
+        .unwrap_or((1920.0, 1080.0));
+    let w = (sw * 0.28).clamp(360.0, 600.0);
+    let h = (sh * 0.65).clamp(480.0, 860.0);
+    (w, h)
+}
 
 pub fn build_native_options(screen_size: Option<(u32, u32)>, config: &Config) -> NativeOptions {
-    let pos = compute_window_pos(screen_size, config);
+    let (win_w, win_h) = compute_window_size(screen_size);
+    let pos = compute_window_pos(screen_size, win_w, win_h, config);
 
     let mut viewport = ViewportBuilder::default()
         .with_decorations(false)
         .with_resizable(false)
         .with_taskbar(false)
-        .with_inner_size(Vec2::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+        .with_inner_size(Vec2::new(win_w, win_h));
 
     if let Some(p) = pos {
         viewport = viewport.with_position(p);
@@ -29,17 +42,23 @@ pub fn build_native_options(screen_size: Option<(u32, u32)>, config: &Config) ->
 /// `NearCursor` always centers the window — cursor tracking is unreliable on
 /// Wayland and unnecessary now that the design calls for a centered launcher.
 ///
-/// `screen_size` is `(width, height)` in physical pixels.  When `None` a
+/// `screen_size` is `(width, height)` in logical pixels.  When `None` a
 /// 1920×1080 fallback is used so the function always returns a safe position.
-pub fn compute_window_pos(screen_size: Option<(u32, u32)>, config: &Config) -> Option<Pos2> {
+/// `win_w` / `win_h` are the computed window dimensions (from `compute_window_size`).
+pub fn compute_window_pos(
+    screen_size: Option<(u32, u32)>,
+    win_w: f32,
+    win_h: f32,
+    config: &Config,
+) -> Option<Pos2> {
     let (sw, sh) = screen_size
         .map(|(w, h)| (w as f32, h as f32))
         .unwrap_or((1920.0, 1080.0));
 
     match &config.window_position {
         WindowPos::NearCursor => {
-            let x = ((sw - WINDOW_WIDTH) / 2.0).max(0.0);
-            let y = ((sh - WINDOW_HEIGHT) / 2.0).max(0.0);
+            let x = ((sw - win_w) / 2.0).max(0.0);
+            let y = ((sh - win_h) / 2.0).max(0.0);
             Some(Pos2::new(x, y))
         }
         WindowPos::Fixed(x, y) => Some(Pos2::new(*x as f32, *y as f32)),
@@ -112,33 +131,88 @@ mod tests {
     const SCREEN_1080P: Option<(u32, u32)> = Some((1920, 1080));
     const SCREEN_1440P: Option<(u32, u32)> = Some((2560, 1440));
 
+    // ── compute_window_size ───────────────────────────────────────────────────
+
+    #[test]
+    fn window_size_1080p_within_bounds() {
+        let (w, h) = compute_window_size(SCREEN_1080P);
+        assert!(w >= 360.0 && w <= 600.0, "width={w}");
+        assert!(h >= 480.0 && h <= 860.0, "height={h}");
+    }
+
+    #[test]
+    fn window_size_1440p_within_bounds() {
+        let (w, h) = compute_window_size(SCREEN_1440P);
+        assert!(w >= 360.0 && w <= 600.0, "width={w}");
+        assert!(h >= 480.0 && h <= 860.0, "height={h}");
+    }
+
+    #[test]
+    fn window_size_fallback_within_bounds() {
+        let (w, h) = compute_window_size(None);
+        assert!(w >= 360.0 && w <= 600.0, "width={w}");
+        assert!(h >= 480.0 && h <= 860.0, "height={h}");
+    }
+
+    #[test]
+    fn window_is_portrait_oriented() {
+        let (w, h) = compute_window_size(SCREEN_1080P);
+        assert!(h > w, "panel should be taller than wide: h={h}, w={w}");
+    }
+
+    #[test]
+    fn window_size_small_screen_clamps_to_minimum() {
+        let (w, h) = compute_window_size(Some((800, 600)));
+        assert_eq!(w, 360.0);
+        assert_eq!(h, 480.0);
+    }
+
+    #[test]
+    fn window_size_4k_clamps_to_maximum() {
+        let (w, h) = compute_window_size(Some((3840, 2160)));
+        assert_eq!(w, 600.0);
+        assert_eq!(h, 860.0);
+    }
+
+    #[test]
+    fn window_size_scales_with_screen() {
+        let (w1, h1) = compute_window_size(Some((1280, 720)));
+        let (w2, h2) = compute_window_size(Some((1920, 1080)));
+        assert!(w2 >= w1, "wider screen → wider window");
+        assert!(h2 >= h1, "taller screen → taller window");
+    }
+
     // ── compute_window_pos / NearCursor (always centers) ─────────────────────
 
     #[test]
     fn near_cursor_centers_on_1080p() {
-        let pos = compute_window_pos(SCREEN_1080P, &config_center()).unwrap();
-        assert_eq!(pos.x, (1920.0 - WINDOW_WIDTH) / 2.0);
-        assert_eq!(pos.y, (1080.0 - WINDOW_HEIGHT) / 2.0);
+        let (win_w, win_h) = compute_window_size(SCREEN_1080P);
+        let pos = compute_window_pos(SCREEN_1080P, win_w, win_h, &config_center()).unwrap();
+        assert_eq!(pos.x, (1920.0 - win_w) / 2.0);
+        assert_eq!(pos.y, (1080.0 - win_h) / 2.0);
     }
 
     #[test]
     fn near_cursor_centers_on_1440p() {
-        let pos = compute_window_pos(SCREEN_1440P, &config_center()).unwrap();
-        assert_eq!(pos.x, (2560.0 - WINDOW_WIDTH) / 2.0);
-        assert_eq!(pos.y, (1440.0 - WINDOW_HEIGHT) / 2.0);
+        let (win_w, win_h) = compute_window_size(SCREEN_1440P);
+        let pos = compute_window_pos(SCREEN_1440P, win_w, win_h, &config_center()).unwrap();
+        assert_eq!(pos.x, (2560.0 - win_w) / 2.0);
+        assert_eq!(pos.y, (1440.0 - win_h) / 2.0);
     }
 
     #[test]
     fn near_cursor_uses_fallback_when_screen_size_none() {
-        let pos = compute_window_pos(None, &config_center()).unwrap();
-        assert_eq!(pos.x, (1920.0 - WINDOW_WIDTH) / 2.0);
-        let expected_y = ((1080.0 - WINDOW_HEIGHT) / 2.0).max(0.0);
+        let (win_w, win_h) = compute_window_size(None);
+        let pos = compute_window_pos(None, win_w, win_h, &config_center()).unwrap();
+        assert_eq!(pos.x, (1920.0 - win_w) / 2.0);
+        let expected_y = ((1080.0 - win_h) / 2.0).max(0.0);
         assert_eq!(pos.y, expected_y);
     }
 
     #[test]
     fn near_cursor_clamps_y_on_small_screen() {
-        let pos = compute_window_pos(SCREEN_1080P, &config_center()).unwrap();
+        let (win_w, win_h) = compute_window_size(SCREEN_1080P);
+        let pos = compute_window_pos(SCREEN_1080P, win_w, win_h, &config_center()).unwrap();
         assert!(pos.y >= 0.0);
     }
 
@@ -146,21 +220,24 @@ mod tests {
 
     #[test]
     fn fixed_returns_exact_position() {
-        let pos = compute_window_pos(SCREEN_1080P, &config_fixed(300, 400)).unwrap();
+        let (win_w, win_h) = compute_window_size(SCREEN_1080P);
+        let pos = compute_window_pos(SCREEN_1080P, win_w, win_h, &config_fixed(300, 400)).unwrap();
         assert_eq!(pos.x, 300.0);
         assert_eq!(pos.y, 400.0);
     }
 
     #[test]
     fn fixed_returns_exact_position_on_1440p() {
-        let pos = compute_window_pos(SCREEN_1440P, &config_fixed(500, 200)).unwrap();
+        let (win_w, win_h) = compute_window_size(SCREEN_1440P);
+        let pos = compute_window_pos(SCREEN_1440P, win_w, win_h, &config_fixed(500, 200)).unwrap();
         assert_eq!(pos.x, 500.0);
         assert_eq!(pos.y, 200.0);
     }
 
     #[test]
     fn fixed_negative_coordinates_passed_through() {
-        let pos = compute_window_pos(SCREEN_1080P, &config_fixed(-50, -100)).unwrap();
+        let (win_w, win_h) = compute_window_size(SCREEN_1080P);
+        let pos = compute_window_pos(SCREEN_1080P, win_w, win_h, &config_fixed(-50, -100)).unwrap();
         assert_eq!(pos.x, -50.0);
         assert_eq!(pos.y, -100.0);
     }
@@ -178,10 +255,11 @@ mod tests {
 
     #[test]
     fn build_native_options_center_sets_position_on_1440p() {
+        let (win_w, win_h) = compute_window_size(SCREEN_1440P);
         let opts = build_native_options(SCREEN_1440P, &config_center());
         let p = opts.viewport.position.unwrap();
-        assert_eq!(p.x, (2560.0 - WINDOW_WIDTH) / 2.0);
-        assert_eq!(p.y, (1440.0 - WINDOW_HEIGHT) / 2.0);
+        assert_eq!(p.x, (2560.0 - win_w) / 2.0);
+        assert_eq!(p.y, (1440.0 - win_h) / 2.0);
     }
 
     #[test]
@@ -199,22 +277,17 @@ mod tests {
     }
 
     #[test]
-    fn window_size_matches_target_dimensions() {
-        assert_eq!(WINDOW_WIDTH, 480.0);
-        assert_eq!(WINDOW_HEIGHT, 680.0);
+    fn header_height_reasonable_at_1080p() {
+        // Header strip = win_h * 0.057. Verify it stays in a comfortable range.
+        let (_, win_h) = compute_window_size(SCREEN_1080P);
+        let h = win_h * 0.057;
+        assert!(h > 25.0 && h < 55.0, "header_height = {h}");
     }
 
     #[test]
-    fn header_height_formula_gives_approx_39px() {
-        // The header strip uses WINDOW_HEIGHT * 0.057.
-        // At 680 px this yields ≈ 38.76 px — must stay in a reasonable range
-        // so that the strip has comfortable hit area without dominating the panel.
-        let h = WINDOW_HEIGHT * 0.057;
-        assert!(h > 35.0 && h < 45.0, "header_height = {h}");
-    }
-
-    #[test]
-    fn window_is_portrait_oriented() {
-        assert!(WINDOW_HEIGHT > WINDOW_WIDTH, "panel should be taller than wide");
+    fn header_height_reasonable_at_1440p() {
+        let (_, win_h) = compute_window_size(SCREEN_1440P);
+        let h = win_h * 0.057;
+        assert!(h > 25.0 && h < 55.0, "header_height = {h}");
     }
 }

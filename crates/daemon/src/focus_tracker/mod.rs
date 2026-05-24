@@ -27,7 +27,7 @@ pub trait FocusTracker: Send + Sync {
     fn start(&self) -> Result<()>;
     fn current_focus(&self) -> Option<FocusHandle>;
     /// The window that had focus just before the most recent focus change.
-    /// On X11/XWayland this is the app that was active before Copieur opened,
+    /// On X11/XWayland this is the app that was active before Copysl opened,
     /// allowing paste to be injected directly without waiting for the WM.
     /// Returns `None` on Wayland (security model blocks focus queries).
     fn previous_focus(&self) -> Option<FocusHandle> {

@@ -11,8 +11,8 @@ pub struct IpcClient {
 
 impl IpcClient {
     pub fn connect() -> Result<Self> {
-        let socket_path = std::env::var("COPIEUR_SOCKET")
-            .map_err(|_| anyhow::anyhow!("COPIEUR_SOCKET environment variable not set"))?;
+        let socket_path = std::env::var("COPYSL_SOCKET")
+            .map_err(|_| anyhow::anyhow!("COPYSL_SOCKET environment variable not set"))?;
 
         let stream = UnixStream::connect(&socket_path)
             .map_err(|e| anyhow::anyhow!("Failed to connect to daemon at {}: {}", socket_path, e))?;
@@ -87,14 +87,14 @@ mod tests {
 
     #[test]
     fn connect_fails_with_no_socket_env() {
-        std::env::set_var("COPIEUR_SOCKET", "/tmp/__copieur_test_nonexistent__.sock");
+        std::env::set_var("COPYSL_SOCKET", "/tmp/__copysl_test_nonexistent__.sock");
         let result = IpcClient::connect();
         assert!(result.is_err());
     }
 
     #[test]
     fn connect_to_nonexistent_path_fails() {
-        let result = IpcClient::connect_to("/nonexistent/path/copieur.sock");
+        let result = IpcClient::connect_to("/nonexistent/path/copysl.sock");
         assert!(result.is_err());
     }
 

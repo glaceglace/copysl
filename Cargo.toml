@@ -27,12 +27,12 @@ log = "0.4"
 env_logger = "0.11"
 
 [package]
-name = "copieur"
+name = "copysl"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "copieur"
+name = "copysl"
 path = "src/main.rs"
 
 [dependencies]

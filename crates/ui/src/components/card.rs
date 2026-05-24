@@ -1,7 +1,6 @@
 use std::time::Duration;
 use common::{ClipboardEntry, ContentPayload};
 use crate::style::{RADIUS_CARD, SPACE_M};
-use crate::window::WINDOW_HEIGHT;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CardAction {
@@ -70,7 +69,7 @@ pub fn show_card(
 ) -> Option<CardAction> {
     let mut action = None;
 
-    let ch = crate::style::card_height(WINDOW_HEIGHT);
+    let ch = crate::style::card_height(ui.ctx().screen_rect().height());
     let content_height = (ch - SPACE_M * 2.0).max(0.0);
 
     // Pre-estimate the card rect for hover detection (one frame lag is acceptable).

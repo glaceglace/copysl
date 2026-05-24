@@ -10,7 +10,7 @@ use rusqlite::{params, Connection};
 pub fn db_path() -> PathBuf {
     dirs::data_local_dir()
         .expect("Could not determine data directory")
-        .join("copieur")
+        .join("copysl")
         .join("history.db")
 }
 

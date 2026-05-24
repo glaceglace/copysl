@@ -28,14 +28,16 @@ pub fn text_width(available: f32, item_spacing: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::window::WINDOW_HEIGHT;
+    use crate::window::compute_window_size;
 
     // ── card_height ───────────────────────────────────────────────────────────
 
     #[test]
     fn card_height_reasonable_at_target_dimensions() {
-        let h = card_height(WINDOW_HEIGHT);
-        assert!(h > 80.0 && h < 120.0, "card_height = {h}");
+        // Use 1080p as a representative screen size.
+        let (_, win_h) = compute_window_size(Some((1920, 1080)));
+        let h = card_height(win_h);
+        assert!(h > 60.0 && h < 130.0, "card_height = {h}");
     }
 
     #[test]

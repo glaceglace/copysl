@@ -4,7 +4,7 @@ pub mod ipc_client;
 pub mod style;
 pub mod window;
 
-use app::CopieurApp;
+use app::CopyslApp;
 
 pub fn ui_main(socket_path: &str) {
     let config = {
@@ -31,12 +31,12 @@ pub fn ui_main(socket_path: &str) {
     let socket_path = socket_path.to_string();
 
     if let Err(e) = eframe::run_native(
-        "Copieur",
+        "Copysl",
         options,
         Box::new(move |cc: &eframe::CreationContext<'_>| {
-            Ok(Box::new(CopieurApp::new(cc, &socket_path)) as Box<dyn eframe::App>)
+            Ok(Box::new(CopyslApp::new(cc, &socket_path)) as Box<dyn eframe::App>)
         }),
     ) {
-        eprintln!("Copieur UI error: {e}");
+        eprintln!("Copysl UI error: {e}");
     }
 }

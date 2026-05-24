@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn daemon_flag_selects_daemon() {
         assert_eq!(
-            parse_mode(&["copieur".to_string(), "--daemon".to_string()]),
+            parse_mode(&["copysl".to_string(), "--daemon".to_string()]),
             RunMode::Daemon
         );
     }
@@ -102,25 +102,25 @@ mod tests {
     #[test]
     fn ui_flag_selects_ui() {
         assert_eq!(
-            parse_mode(&["copieur".to_string(), "--ui".to_string()]),
+            parse_mode(&["copysl".to_string(), "--ui".to_string()]),
             RunMode::Ui
         );
     }
 
     #[test]
     fn debug_flag_detected() {
-        assert!(has_debug_flag(&["copieur".to_string(), "--debug".to_string()]));
+        assert!(has_debug_flag(&["copysl".to_string(), "--debug".to_string()]));
     }
 
     #[test]
     fn debug_flag_absent_without_arg() {
-        assert!(!has_debug_flag(&["copieur".to_string()]));
+        assert!(!has_debug_flag(&["copysl".to_string()]));
     }
 
     #[test]
     fn debug_flag_combines_with_mode_flags() {
         let args = vec![
-            "copieur".to_string(),
+            "copysl".to_string(),
             "--daemon".to_string(),
             "--debug".to_string(),
         ];

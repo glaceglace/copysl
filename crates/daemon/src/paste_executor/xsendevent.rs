@@ -39,7 +39,7 @@ impl PasteBackend for XSendEventBackend {
             let root = screen.root();
 
             // If the caller supplies a specific X11 window (the app that was focused
-            // before Copieur opened), move input focus there explicitly.  This lets
+            // before Copysl opened), move input focus there explicitly.  This lets
             // us skip the 300 ms WM-delay entirely: we target the window directly
             // rather than waiting for the WM to return focus on its own.
             //

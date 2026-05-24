@@ -106,11 +106,11 @@ impl TryFrom<ConfigToml> for Config {
 // ---------------------------------------------------------------------------
 
 /// Returns the canonical path to the user's config file:
-/// `$XDG_CONFIG_HOME/copieur/config.toml` (typically `~/.config/copieur/config.toml`).
+/// `$XDG_CONFIG_HOME/copysl/config.toml` (typically `~/.config/copysl/config.toml`).
 pub fn config_path() -> PathBuf {
     dirs::config_dir()
         .expect("Could not determine config directory")
-        .join("copieur")
+        .join("copysl")
         .join("config.toml")
 }
 

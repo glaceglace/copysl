@@ -83,7 +83,7 @@ async fn async_daemon_main() {
             return;
         }
     };
-    log::info!("Copieur daemon started at {}", socket_path.display());
+    log::info!("Copysl daemon started at {}", socket_path.display());
 
     // 6. Broadcast channel for new entries
     let (new_entry_tx, _) = broadcast::channel::<common::ClipboardEntry>(64);
@@ -187,7 +187,7 @@ async fn async_daemon_main() {
 
     // 14. Graceful shutdown
     server_task.abort();
-    log::info!("Copieur daemon stopped");
+    log::info!("Copysl daemon stopped");
 }
 
 // ---------------------------------------------------------------------------

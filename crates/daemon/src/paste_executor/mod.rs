@@ -212,7 +212,7 @@ impl PasteExecutor {
 
             // ── Step 2: decide whether to delay and which window to target ───
             // On X11/XWayland we know exactly which window was focused before
-            // Copieur opened (stored in previous_focus).  We can set focus there
+            // Copysl opened (stored in previous_focus).  We can set focus there
             // directly via XSetInputFocus, so no WM round-trip delay is needed.
             //
             // On Wayland + ydotool there is no per-window targeting API; ydotool

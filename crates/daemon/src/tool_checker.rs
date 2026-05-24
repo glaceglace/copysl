@@ -21,7 +21,7 @@
 //!      XWayland apps but NOT native Wayland apps.
 //!    - NotificationFallback — silent fallback; Ctrl+V is NOT injected.
 //!
-//! 3. **Focus return** — after the Copieur window closes the window manager
+//! 3. **Focus return** — after the Copysl window closes the window manager
 //!    automatically returns focus to the previously active window.  No external
 //!    tool is needed for this.
 //!
@@ -307,7 +307,7 @@ systemctl --user enable --now ydotoold".to_string(),
     // ── RECOMMENDED: persistent clipboard daemon ───────────────────────────
     // arboard's clipboard is served by a background thread that dies when the
     // Clipboard handle is dropped.  A persistent daemon (wl-copy / xclip) keeps
-    // the clipboard alive after the Copieur window closes, making paste more
+    // the clipboard alive after the Copysl window closes, making paste more
     // reliable.
     let has_persistent_clipboard = (has_wayland && has_wl_copy) || has_xclip;
     if !has_persistent_clipboard {
@@ -315,7 +315,7 @@ systemctl --user enable --now ydotoold".to_string(),
             missing_recommended.push(ToolRequirement {
                 tool_name: "wl-copy".to_string(),
                 purpose:
-                    "Persist clipboard content after Copieur closes (wl-clipboard package)"
+                    "Persist clipboard content after Copysl closes (wl-clipboard package)"
                         .to_string(),
                 install_hint: format!("{pm} wl-clipboard"),
             });
@@ -323,7 +323,7 @@ systemctl --user enable --now ydotoold".to_string(),
         if !has_xclip {
             missing_recommended.push(ToolRequirement {
                 tool_name: "xclip".to_string(),
-                purpose: "Persist clipboard content after Copieur closes on X11".to_string(),
+                purpose: "Persist clipboard content after Copysl closes on X11".to_string(),
                 install_hint: format!("{pm} xclip"),
             });
         }

@@ -16,13 +16,13 @@ use crate::history_store::HistoryStore;
 
 pub fn socket_path() -> PathBuf {
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir).join("copieur.sock")
+        PathBuf::from(runtime_dir).join("copysl.sock")
     } else {
         let uid = std::env::var("UID")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(1000);
-        PathBuf::from(format!("/tmp/copieur-{uid}.sock"))
+        PathBuf::from(format!("/tmp/copysl-{uid}.sock"))
     }
 }
 

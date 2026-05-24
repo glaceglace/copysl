@@ -7,7 +7,7 @@ use crate::components::{
 };
 use crate::ipc_client::IpcClient;
 
-pub struct CopieurApp {
+pub struct CopyslApp {
     ipc: Option<IpcClient>,
     entries: Vec<ClipboardEntry>,
     filtered: Vec<usize>,
@@ -34,11 +34,11 @@ struct ToolWarnings {
     missing_recommended: Vec<ToolRequirement>,
 }
 
-impl CopieurApp {
+impl CopyslApp {
     pub fn new(cc: &eframe::CreationContext<'_>, socket_path: &str) -> Self {
         match IpcClient::connect_to(socket_path) {
             Err(e) => {
-                let app = CopieurApp {
+                let app = CopyslApp {
                     ipc: None,
                     entries: vec![],
                     filtered: vec![],
@@ -49,7 +49,7 @@ impl CopieurApp {
                     config: Config::default(),
                     error_banner: None,
                     startup_error: Some(format!(
-                        "Copieur daemon is not running.\nStart with: copieur --daemon\n\nError: {e}"
+                        "Copysl daemon is not running.\nStart with: copysl --daemon\n\nError: {e}"
                     )),
                     tool_warnings: None,
                     had_focus: false,
@@ -88,7 +88,7 @@ impl CopieurApp {
                 let settings_panel = SettingsPanel::new(config.clone());
                 setup_fonts(&cc.egui_ctx);
                 apply_theme(&cc.egui_ctx, &config.theme);
-                CopieurApp {
+                CopyslApp {
                     ipc: Some(ipc),
                     entries,
                     filtered,
@@ -189,7 +189,7 @@ impl CopieurApp {
     }
 }
 
-impl eframe::App for CopieurApp {
+impl eframe::App for CopyslApp {
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         visuals.panel_fill.to_normalized_gamma_f32()
     }
@@ -219,16 +219,15 @@ impl eframe::App for CopieurApp {
     }
 }
 
-impl CopieurApp {
+impl CopyslApp {
     fn render(&mut self, ui: &mut egui::Ui) {
         use crate::style::SPACE_M;
-        use crate::window::WINDOW_HEIGHT;
 
         let ctx = ui.ctx().clone();
 
         // Startup error modal — shown full-width, no panel padding needed
         if let Some(err) = self.startup_error.clone() {
-            ui.heading("Copieur");
+            ui.heading("Copysl");
             ui.label(&err);
             if ui.button("OK").clicked() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -303,7 +302,7 @@ impl CopieurApp {
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(SPACE_M as i8, 0))
             .show(ui, |ui| {
-                let header_height = WINDOW_HEIGHT * 0.057;
+                let header_height = ctx.screen_rect().height() * 0.057;
 
                 // Header strip: drag icon + title + gear button
                 let header_resp = ui.horizontal(|ui| {
@@ -566,9 +565,9 @@ mod tests {
     use common::{ContentPayload, EntryId};
     use std::time::SystemTime;
 
-    fn make_app_with_entries(entries: Vec<ClipboardEntry>) -> CopieurApp {
+    fn make_app_with_entries(entries: Vec<ClipboardEntry>) -> CopyslApp {
         let filtered = (0..entries.len()).collect();
-        CopieurApp {
+        CopyslApp {
             ipc: None,
             entries,
             filtered,
@@ -616,7 +615,7 @@ mod tests {
 
     #[test]
     fn startup_error_set_when_daemon_not_running() {
-        std::env::remove_var("COPIEUR_SOCKET");
+        std::env::remove_var("COPYSL_SOCKET");
         let result = IpcClient::connect();
         assert!(result.is_err());
     }

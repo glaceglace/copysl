@@ -46,176 +46,223 @@ impl PersistenceToggleState {
 pub struct SettingsPanel {
     pub draft: Config,
     pub show_persist_warning: bool,
+    paste_delay_text: String,
 }
 
 impl SettingsPanel {
     pub fn new(config: Config) -> Self {
+        let paste_delay_text = config.paste_delay_ms.to_string();
         SettingsPanel {
             draft: config,
             show_persist_warning: false,
+            paste_delay_text,
         }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<SettingsAction> {
+        use crate::style::{RADIUS_CARD, SPACE_L, SPACE_S};
+
         let mut action = None;
+        let visuals = ui.visuals().clone();
 
-        ui.heading("Settings");
+        // Wrap in a "sheet" frame so it reads as a distinct visual layer over the card list
+        let sheet_frame = egui::Frame::new()
+            .fill(visuals.window_fill)
+            .stroke(visuals.window_stroke())
+            .corner_radius(egui::CornerRadius::same(RADIUS_CARD))
+            .inner_margin(egui::Margin::same(SPACE_L as i8));
 
-        // Close button
-        if ui.button("×").clicked() {
-            action = Some(SettingsAction::Close);
-        }
-
-        ui.separator();
-
-        // Max entries
-        ui.horizontal(|ui| {
-            ui.label("Max history entries:");
-            let mut max = self.draft.max_entries as i32;
-            if ui.add(egui::DragValue::new(&mut max).range(10..=10000)).changed() {
-                self.draft.max_entries = max.max(10) as usize;
-                action = Some(SettingsAction::SaveConfig(self.draft.clone()));
-            }
-        });
-
-        // Persist history
-        {
-            let mut persist = self.draft.persist_history;
+        sheet_frame.show(ui, |ui| {
+            // Title row: "Settings" on the left, back button on the right
             ui.horizontal(|ui| {
-                if ui.checkbox(&mut persist, "Persist history to disk").changed() {
-                    if persist && !self.draft.persist_history {
-                        // Toggling ON: show warning
-                        self.show_persist_warning = true;
-                    } else if !persist {
-                        self.draft.persist_history = false;
-                        action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                ui.label(
+                    egui::RichText::new("Settings")
+                        .text_style(egui::TextStyle::Body)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(egui::Button::new("←").frame(false)).clicked() {
+                        action = Some(SettingsAction::Close);
                     }
+                });
+            });
+
+            // ── History limits ─────────────────────────────────────────────
+            ui.separator();
+
+            ui.horizontal(|ui| {
+                ui.label("Max history entries:");
+                let mut max = self.draft.max_entries as i32;
+                if ui.add(egui::DragValue::new(&mut max).range(10..=10000)).changed() {
+                    self.draft.max_entries = max.max(10) as usize;
+                    action = Some(SettingsAction::SaveConfig(self.draft.clone()));
                 }
             });
-            if self.show_persist_warning {
-                ui.colored_label(egui::Color32::YELLOW, "Warning: Enabling this saves clipboard contents (including passwords and tokens) to disk. Confirm to proceed.");
-                ui.horizontal(|ui| {
-                    if ui.button("I understand, enable").clicked() {
-                        self.draft.persist_history = true;
-                        self.show_persist_warning = false;
-                        action = Some(SettingsAction::SaveConfig(self.draft.clone()));
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.show_persist_warning = false;
-                        // draft.persist_history stays false
-                    }
-                });
-            }
-        }
 
-        // Autostart
-        {
-            let mut autostart = self.draft.autostart;
-            if ui.checkbox(&mut autostart, "Start on login").changed() {
-                self.draft.autostart = autostart;
-                action = Some(SettingsAction::SaveConfig(self.draft.clone()));
-            }
-        }
+            // ── Persistence ────────────────────────────────────────────────
+            ui.separator();
 
-        // Window position
-        ui.horizontal(|ui| {
-            ui.label("Window position:");
-            let is_fixed = matches!(self.draft.window_position, WindowPos::Fixed(_, _));
-            let mut current = if is_fixed { "Fixed" } else { "Near cursor" }.to_string();
-            egui::ComboBox::from_id_salt("window_pos")
-                .selected_text(&current)
-                .show_ui(ui, |ui| {
-                    if ui.selectable_value(&mut current, "Near cursor".to_string(), "Near cursor").clicked() {
-                        self.draft.window_position = WindowPos::NearCursor;
-                        action = Some(SettingsAction::SaveConfig(self.draft.clone()));
-                    }
-                    if ui.selectable_value(&mut current, "Fixed".to_string(), "Fixed position").clicked() {
-                        self.draft.window_position = WindowPos::Fixed(100, 100);
-                        action = Some(SettingsAction::SaveConfig(self.draft.clone()));
-                    }
-                });
-        });
-
-        if matches!(self.draft.window_position, WindowPos::Fixed(_, _)) {
-            let (mut x, mut y) = if let WindowPos::Fixed(x, y) = self.draft.window_position {
-                (x, y)
-            } else {
-                unreachable!()
-            };
-            let mut changed = false;
-            ui.horizontal(|ui| {
-                ui.label("X:");
-                if ui.add(egui::DragValue::new(&mut x)).changed() {
-                    changed = true;
-                }
-                ui.label("Y:");
-                if ui.add(egui::DragValue::new(&mut y)).changed() {
-                    changed = true;
-                }
-            });
-            if changed {
-                self.draft.window_position = WindowPos::Fixed(x, y);
-                action = Some(SettingsAction::SaveConfig(self.draft.clone()));
-            }
-        }
-
-        // Theme
-        ui.horizontal(|ui| {
-            ui.label("Theme:");
-            let current = match self.draft.theme {
-                Theme::System => "System",
-                Theme::Light => "Light",
-                Theme::Dark => "Dark",
-            };
-            egui::ComboBox::from_id_salt("theme")
-                .selected_text(current)
-                .show_ui(ui, |ui| {
-                    if ui.selectable_value(&mut self.draft.theme, Theme::System, "System").clicked() {
-                        action = Some(SettingsAction::SaveConfig(self.draft.clone()));
-                    }
-                    if ui.selectable_value(&mut self.draft.theme, Theme::Light, "Light").clicked() {
-                        action = Some(SettingsAction::SaveConfig(self.draft.clone()));
-                    }
-                    if ui.selectable_value(&mut self.draft.theme, Theme::Dark, "Dark").clicked() {
-                        action = Some(SettingsAction::SaveConfig(self.draft.clone()));
-                    }
-                });
-        });
-
-        // Paste delay (Wayland only)
-        ui.separator();
-        ui.label("Wayland paste delay");
-        ui.label(
-            "How long the daemon waits after the Copieur window closes before \
-             injecting Ctrl+V. Only applies on Wayland, where the window manager \
-             must return focus to the previous app first. On X11/XWayland this \
-             setting is ignored — paste is always instant."
-        );
-        ui.label("⚠ Too short: keystrokes arrive before focus returns, wrong window pastes.");
-        ui.label("⏱ Too long: noticeable lag between clicking and text appearing.");
-        ui.horizontal(|ui| {
-            let mut delay = self.draft.paste_delay_ms as f32;
-            if ui
-                .add(
-                    egui::Slider::new(&mut delay, 10.0..=3000.0)
-                        .suffix(" ms")
-                        .step_by(10.0),
-                )
-                .changed()
             {
-                self.draft.paste_delay_ms = delay as u32;
-                action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                let mut persist = self.draft.persist_history;
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut persist, "Persist history to disk").changed() {
+                        if persist && !self.draft.persist_history {
+                            self.show_persist_warning = true;
+                        } else if !persist {
+                            self.draft.persist_history = false;
+                            action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                        }
+                    }
+                });
+                if self.show_persist_warning {
+                    ui.add_space(SPACE_S);
+                    ui.colored_label(egui::Color32::YELLOW, "Warning: Enabling this saves clipboard contents (including passwords and tokens) to disk. Confirm to proceed.");
+                    ui.add_space(SPACE_S);
+                    ui.horizontal(|ui| {
+                        if ui.button("I understand, enable").clicked() {
+                            self.draft.persist_history = true;
+                            self.show_persist_warning = false;
+                            action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_persist_warning = false;
+                        }
+                    });
+                }
             }
-            if ui.button("Default (150 ms)").clicked() {
-                self.draft.paste_delay_ms = 150;
-                action = Some(SettingsAction::SaveConfig(self.draft.clone()));
-            }
-        });
 
-        ui.separator();
-        if ui.button("Kill daemon").clicked() {
-            action = Some(SettingsAction::KillDaemon);
-        }
+            // ── Display settings ───────────────────────────────────────────
+            ui.separator();
+
+            {
+                let mut autostart = self.draft.autostart;
+                if ui.checkbox(&mut autostart, "Start on login").changed() {
+                    self.draft.autostart = autostart;
+                    action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                }
+            }
+
+            ui.add_space(SPACE_S);
+
+            ui.horizontal(|ui| {
+                ui.label("Window position:");
+                let is_fixed = matches!(self.draft.window_position, WindowPos::Fixed(_, _));
+                let mut current = if is_fixed { "Fixed" } else { "Center of screen" }.to_string();
+                egui::ComboBox::from_id_salt("window_pos")
+                    .selected_text(&current)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_value(&mut current, "Center of screen".to_string(), "Center of screen").clicked() {
+                            self.draft.window_position = WindowPos::NearCursor;
+                            action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                        }
+                        if ui.selectable_value(&mut current, "Fixed".to_string(), "Fixed position").clicked() {
+                            self.draft.window_position = WindowPos::Fixed(100, 100);
+                            action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                        }
+                    });
+            });
+
+            if matches!(self.draft.window_position, WindowPos::Fixed(_, _)) {
+                let (mut x, mut y) = if let WindowPos::Fixed(x, y) = self.draft.window_position {
+                    (x, y)
+                } else {
+                    unreachable!()
+                };
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    ui.label("X:");
+                    if ui.add(egui::DragValue::new(&mut x)).changed() { changed = true; }
+                    ui.label("Y:");
+                    if ui.add(egui::DragValue::new(&mut y)).changed() { changed = true; }
+                });
+                if changed {
+                    self.draft.window_position = WindowPos::Fixed(x, y);
+                    action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                }
+            }
+
+            ui.add_space(SPACE_S);
+
+            ui.horizontal(|ui| {
+                ui.label("Theme:");
+                let current = match self.draft.theme {
+                    Theme::System => "System",
+                    Theme::Light => "Light",
+                    Theme::Dark => "Dark",
+                };
+                egui::ComboBox::from_id_salt("theme")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_value(&mut self.draft.theme, Theme::System, "System").clicked() {
+                            action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                        }
+                        if ui.selectable_value(&mut self.draft.theme, Theme::Light, "Light").clicked() {
+                            action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                        }
+                        if ui.selectable_value(&mut self.draft.theme, Theme::Dark, "Dark").clicked() {
+                            action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                        }
+                    });
+            });
+
+            // ── Wayland paste delay ────────────────────────────────────────
+            ui.separator();
+
+            ui.label("Wayland paste delay");
+            ui.add_space(SPACE_S);
+            ui.label(
+                "How long the daemon waits after the Copieur window closes before \
+                 injecting Ctrl+V. Only applies on Wayland. On X11/XWayland this \
+                 setting is ignored — paste is always instant."
+            );
+            ui.add_space(SPACE_S);
+            ui.label("⚠ Too short: keystrokes arrive before focus returns, wrong window pastes.");
+            ui.label("⏱ Too long: noticeable lag between clicking and text appearing.");
+            ui.add_space(SPACE_S);
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.paste_delay_text)
+                        .desired_width(56.0),
+                );
+                ui.label("ms");
+                if resp.lost_focus() {
+                    match self.paste_delay_text.trim().parse::<u32>() {
+                        Ok(v) => {
+                            let clamped = v.clamp(10, 3000);
+                            self.draft.paste_delay_ms = clamped;
+                            self.paste_delay_text = clamped.to_string();
+                            action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                        }
+                        Err(_) => {
+                            self.paste_delay_text = self.draft.paste_delay_ms.to_string();
+                        }
+                    }
+                }
+                if ui.button("Default (150 ms)").clicked() {
+                    self.draft.paste_delay_ms = 150;
+                    self.paste_delay_text = "150".to_string();
+                    action = Some(SettingsAction::SaveConfig(self.draft.clone()));
+                }
+            });
+
+            // ── Danger zone ────────────────────────────────────────────────
+            ui.separator();
+
+            let danger_frame = egui::Frame::new()
+                .fill(egui::Color32::from_rgba_unmultiplied(180, 40, 40, 15))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 60, 60)))
+                .corner_radius(egui::CornerRadius::same(RADIUS_CARD))
+                .inner_margin(egui::Margin::same(SPACE_S as i8));
+
+            danger_frame.show(ui, |ui| {
+                if ui.add(egui::Button::new(
+                    egui::RichText::new("Kill daemon")
+                        .color(egui::Color32::from_rgb(200, 60, 60)),
+                ).frame(false)).clicked() {
+                    action = Some(SettingsAction::KillDaemon);
+                }
+            });
+        });
 
         action
     }

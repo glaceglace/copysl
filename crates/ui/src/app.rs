@@ -21,6 +21,10 @@ pub struct CopieurApp {
     /// Missing tools detected at startup.  `None` means no warnings (or
     /// the user already dismissed the popup).
     tool_warnings: Option<ToolWarnings>,
+    /// Set true once the window has received focus at least once.  Only
+    /// after that do we close on focus loss (avoids closing at startup
+    /// before the OS delivers the initial focus event).
+    had_focus: bool,
 }
 
 struct ToolWarnings {
@@ -31,23 +35,29 @@ struct ToolWarnings {
 }
 
 impl CopieurApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>, socket_path: &str) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, socket_path: &str) -> Self {
         match IpcClient::connect_to(socket_path) {
-            Err(e) => CopieurApp {
-                ipc: None,
-                entries: vec![],
-                filtered: vec![],
-                search_bar: SearchBar::new(),
-                card_list: CardList::new(),
-                show_settings: false,
-                settings_panel: SettingsPanel::new(Config::default()),
-                config: Config::default(),
-                error_banner: None,
-                startup_error: Some(format!(
-                    "Copieur daemon is not running.\nStart with: copieur --daemon\n\nError: {e}"
-                )),
-                tool_warnings: None,
-            },
+            Err(e) => {
+                let app = CopieurApp {
+                    ipc: None,
+                    entries: vec![],
+                    filtered: vec![],
+                    search_bar: SearchBar::new(),
+                    card_list: CardList::new(),
+                    show_settings: false,
+                    settings_panel: SettingsPanel::new(Config::default()),
+                    config: Config::default(),
+                    error_banner: None,
+                    startup_error: Some(format!(
+                        "Copieur daemon is not running.\nStart with: copieur --daemon\n\nError: {e}"
+                    )),
+                    tool_warnings: None,
+                    had_focus: false,
+                };
+                setup_fonts(&cc.egui_ctx);
+                apply_theme(&cc.egui_ctx, &app.config.theme);
+                app
+            }
             Ok(mut ipc) => {
                 let entries = match ipc.send(&DaemonRequest::GetHistory { offset: 0, limit: 200 }) {
                     Ok(DaemonResponse::History(entries)) => entries,
@@ -76,6 +86,8 @@ impl CopieurApp {
                 };
                 let filtered = (0..entries.len()).collect();
                 let settings_panel = SettingsPanel::new(config.clone());
+                setup_fonts(&cc.egui_ctx);
+                apply_theme(&cc.egui_ctx, &config.theme);
                 CopieurApp {
                     ipc: Some(ipc),
                     entries,
@@ -88,6 +100,7 @@ impl CopieurApp {
                     error_banner: None,
                     startup_error: None,
                     tool_warnings,
+                    had_focus: false,
                 }
             }
         }
@@ -176,6 +189,10 @@ impl CopieurApp {
 }
 
 impl eframe::App for CopieurApp {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Poll daemon push notifications every frame (non-UI logic only)
         if let Some(ipc) = self.ipc.as_mut() {
@@ -184,6 +201,15 @@ impl eframe::App for CopieurApp {
                 self.refilter();
             }
         }
+
+        // Close when the window loses focus (user clicked outside).
+        let focused = ctx.input(|i| i.focused);
+        match focus_decision(focused, self.had_focus) {
+            FocusDecision::MarkFocused => self.had_focus = true,
+            FocusDecision::Close => self.close(ctx),
+            FocusDecision::RequestFocus => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
+        }
+
         ctx.request_repaint();
     }
 
@@ -194,8 +220,12 @@ impl eframe::App for CopieurApp {
 
 impl CopieurApp {
     fn render(&mut self, ui: &mut egui::Ui) {
+        use crate::style::SPACE_M;
+        use crate::window::WINDOW_HEIGHT;
+
         let ctx = ui.ctx().clone();
-        // Show startup error modal
+
+        // Startup error modal — shown full-width, no panel padding needed
         if let Some(err) = self.startup_error.clone() {
             ui.heading("Copieur");
             ui.label(&err);
@@ -268,56 +298,208 @@ impl CopieurApp {
             }
         }
 
-        // Top bar: title and gear icon
-        ui.horizontal(|ui| {
-            ui.heading("Clipboard History");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("⚙").clicked() {
-                    self.show_settings = !self.show_settings;
-                    if self.show_settings {
-                        self.settings_panel = SettingsPanel::new(self.config.clone());
-                    }
-                }
-            });
-        });
+        // Main content: horizontal padding applied once here, not per-component
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(SPACE_M as i8, 0))
+            .show(ui, |ui| {
+                let header_height = WINDOW_HEIGHT * 0.057;
 
-        if self.show_settings {
-            if let Some(action) = self.settings_panel.show(ui) {
-                match action {
-                    SettingsAction::SaveConfig(new_config) => {
-                        if let Some(DaemonResponse::Ok) =
-                            self.send_ipc(DaemonRequest::UpdateConfig(new_config.clone()))
-                        {
-                            self.config = new_config;
+                // Header strip: drag icon + title + gear button
+                let header_resp = ui.horizontal(|ui| {
+                    ui.set_min_height(header_height);
+                    ui.label(
+                        egui::RichText::new("≡")
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                    ui.label(
+                        egui::RichText::new("Clipboard History")
+                            .text_style(egui::TextStyle::Body)
+                            .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new("⚙").frame(false)).clicked() {
+                            self.show_settings = !self.show_settings;
+                            if self.show_settings {
+                                self.settings_panel = SettingsPanel::new(self.config.clone());
+                            }
+                        }
+                    });
+                }).response;
+
+                // Clicking and dragging the header strip moves the borderless window
+                if header_resp.is_pointer_button_down_on() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                ui.separator();
+
+                if self.show_settings {
+                    if let Some(action) = self.settings_panel.show(ui) {
+                        match action {
+                            SettingsAction::SaveConfig(new_config) => {
+                                if let Some(DaemonResponse::Ok) =
+                                    self.send_ipc(DaemonRequest::UpdateConfig(new_config.clone()))
+                                {
+                                    self.config = new_config;
+                                    apply_theme(&ctx, &self.config.theme);
+                                }
+                            }
+                            SettingsAction::Close => {
+                                self.show_settings = false;
+                            }
+                            SettingsAction::KillDaemon => {
+                                self.send_ipc(DaemonRequest::Shutdown);
+                                self.close(&ctx);
+                            }
                         }
                     }
-                    SettingsAction::Close => {
-                        self.show_settings = false;
+                } else {
+                    // Search bar
+                    let query_changed = self.search_bar.show(ui, true);
+                    if query_changed {
+                        self.refilter();
                     }
-                    SettingsAction::KillDaemon => {
-                        self.send_ipc(DaemonRequest::Shutdown);
-                        self.close(&ctx);
+
+                    // Card list
+                    let filtered_clone = self.filtered.clone();
+                    if let Some(action) = self.card_list.show(ui, &self.entries, &filtered_clone) {
+                        self.handle_card_action(action, &ctx);
                     }
                 }
-            }
-        } else {
-            // Search bar
-            let query_changed = self.search_bar.show(ui, true);
-            if query_changed {
-                self.refilter();
-            }
 
-            // Card list
-            let filtered_clone = self.filtered.clone();
-            if let Some(action) = self.card_list.show(ui, &self.entries, &filtered_clone) {
-                self.handle_card_action(action, &ctx);
-            }
-        }
+                // Global Escape key to close
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.close(&ctx);
+                }
+            });
+    }
+}
 
-        // Global Escape key to close
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.close(&ctx);
+/// Load a system sans-serif font as the primary proportional font.
+///
+/// egui's bundled Ubuntu-Light covers only Latin glyphs, so symbols like
+/// `←` (U+2190) and `≡` (U+2261) are missing.  A system font such as DejaVu
+/// Sans or Liberation Sans covers these ranges and is present on virtually all
+/// Linux distributions.  The function tries a prioritised list of known paths
+/// and silently no-ops when none are found (egui's bundled fonts remain active).
+pub fn setup_fonts(ctx: &egui::Context) {
+    let candidates: &[&str] = &[
+        // DejaVu Sans — ships by default on most distros
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",       // Fedora / RHEL
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",         // Debian / Ubuntu
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",                     // Arch Linux
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",                  // openSUSE / generic
+        "/usr/share/fonts/dejavu-fonts/DejaVuSans.ttf",
+        // Liberation Sans — common on RHEL-family and many others
+        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf", // Fedora
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",   // Debian / Ubuntu
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",            // Arch / generic
+        // Noto Sans — increasingly the default on newer distros
+        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",        // Fedora
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",      // Debian / Ubuntu
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",               // generic
+        "/usr/share/fonts/TTF/NotoSans-Regular.ttf",                // Arch
+        // FreeSans (GNU FreeFont) — available on most distros as a fallback
+        "/usr/share/fonts/gnu-free/FreeSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ];
+
+    for path in candidates {
+        if let Ok(data) = std::fs::read(path) {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "SystemSans".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(data)),
+            );
+            // Prepend so the system font is tried first; egui's bundled fonts
+            // (NotoEmoji, emoji-icon-font) remain as fallbacks for emoji and
+            // symbols not present in the system font.
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "SystemSans".to_owned());
+            ctx.set_fonts(fonts);
+            break;
         }
+    }
+
+    // Labels are not selectable by default so hovering over text does not show
+    // the IBeam cursor.  egui defaults this to true, which is correct for text
+    // editors but wrong for a launcher-style panel where nothing is editable.
+    ctx.style_mut(|s| s.interaction.selectable_labels = false);
+}
+
+/// Warm light visuals — cream-tinted so the app reads as clearly "light"
+/// without being cold or snow-white.
+///
+/// Default egui light uses `from_gray(248)` panels and `from_gray(230)` cards,
+/// which look flat and neutral.  We swap those for warm off-white/beige tones.
+pub fn light_visuals() -> egui::Visuals {
+    let mut v = egui::Visuals::light();
+
+    // Warm cream hierarchy (panel < card < hover < active so each level is
+    // visually distinct without being harsh).
+    let warm_panel  = egui::Color32::from_rgb(250, 247, 240); // main background
+    let warm_card   = egui::Color32::from_rgb(240, 236, 228); // card / inactive
+    let warm_hover  = egui::Color32::from_rgb(228, 223, 214); // hovered
+    let warm_active = egui::Color32::from_rgb(212, 207, 196); // pressed / active
+    let warm_input  = egui::Color32::from_rgb(255, 253, 248); // text-edit bg
+
+    v.window_fill  = warm_panel;
+    v.panel_fill   = warm_panel;
+    v.extreme_bg_color = warm_input;
+
+    v.widgets.noninteractive.weak_bg_fill = warm_panel;
+    v.widgets.noninteractive.bg_fill      = warm_panel;
+
+    v.widgets.inactive.weak_bg_fill = warm_card;
+    v.widgets.inactive.bg_fill      = warm_card;
+
+    v.widgets.hovered.weak_bg_fill = warm_hover;
+    v.widgets.hovered.bg_fill      = warm_hover;
+
+    v.widgets.active.weak_bg_fill = warm_active;
+    v.widgets.active.bg_fill      = warm_active;
+
+    v
+}
+
+/// Apply the configured theme to an egui context.
+///
+/// Light → custom warm visuals.  Dark → egui default dark.  System → let egui
+/// follow the OS color scheme (no custom visuals override).
+pub fn apply_theme(ctx: &egui::Context, theme: &common::Theme) {
+    // Store warm light visuals persistently so begin_pass reads them every frame.
+    ctx.set_visuals_of(egui::Theme::Light, light_visuals());
+    ctx.set_theme(match theme {
+        common::Theme::Dark   => egui::ThemePreference::Dark,
+        common::Theme::Light  => egui::ThemePreference::Light,
+        common::Theme::System => egui::ThemePreference::System,
+    });
+}
+
+/// What the focus-tracking logic wants to do on a given frame.
+#[derive(Debug, PartialEq)]
+pub enum FocusDecision {
+    /// Window now has focus — record it so we can detect future loss.
+    MarkFocused,
+    /// Window had focus before but just lost it — close.
+    Close,
+    /// Window has never received focus — keep asking the WM for it.
+    RequestFocus,
+}
+
+/// Pure function: decides what to do based on current and prior focus state.
+///
+/// Extracted so the state machine can be unit-tested without an egui context.
+pub fn focus_decision(focused: bool, had_focus: bool) -> FocusDecision {
+    if focused {
+        FocusDecision::MarkFocused
+    } else if had_focus {
+        FocusDecision::Close
+    } else {
+        FocusDecision::RequestFocus
     }
 }
 
@@ -365,6 +547,7 @@ mod tests {
             error_banner: None,
             startup_error: None,
             tool_warnings: None,
+            had_focus: false,
         }
     }
 
@@ -454,5 +637,168 @@ mod tests {
         let mut app = make_app_with_entries(vec![]);
         let result = app.send_ipc(DaemonRequest::GetHistory { offset: 0, limit: 10 });
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn had_focus_starts_false() {
+        let app = make_app_with_entries(vec![]);
+        assert!(!app.had_focus);
+    }
+
+    // ── light_visuals ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn light_visuals_dark_mode_is_false() {
+        assert!(!light_visuals().dark_mode);
+    }
+
+    #[test]
+    fn light_visuals_panel_fill_is_warm_not_cold_gray() {
+        let v = light_visuals();
+        // egui default light is from_gray(248) = (248, 248, 248) — no warmth.
+        // Our palette has more red than blue, giving a cream tone.
+        let [r, _, b, _] = v.panel_fill.to_array();
+        assert!(r > b, "panel fill should be warmer (more red) than cold gray");
+        assert_ne!(v.panel_fill, egui::Color32::WHITE, "must not be pure white");
+    }
+
+    #[test]
+    fn light_visuals_card_bg_darker_than_panel() {
+        let v = light_visuals();
+        // Cards should be visually distinct from (darker than) the panel background.
+        let avg = |c: egui::Color32| -> u32 {
+            let [r, g, b, _] = c.to_array();
+            (r as u32 + g as u32 + b as u32) / 3
+        };
+        assert!(avg(v.widgets.inactive.bg_fill) < avg(v.panel_fill));
+    }
+
+    #[test]
+    fn light_visuals_hover_darker_than_card() {
+        let v = light_visuals();
+        let avg = |c: egui::Color32| -> u32 {
+            let [r, g, b, _] = c.to_array();
+            (r as u32 + g as u32 + b as u32) / 3
+        };
+        assert!(avg(v.widgets.hovered.bg_fill) < avg(v.widgets.inactive.bg_fill));
+    }
+
+    #[test]
+    fn light_visuals_active_darkest_of_card_states() {
+        let v = light_visuals();
+        let avg = |c: egui::Color32| -> u32 {
+            let [r, g, b, _] = c.to_array();
+            (r as u32 + g as u32 + b as u32) / 3
+        };
+        assert!(avg(v.widgets.active.bg_fill) < avg(v.widgets.hovered.bg_fill));
+    }
+
+    // ── clear_color ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn clear_color_matches_panel_fill_for_light_visuals() {
+        let app = make_app_with_entries(vec![]);
+        let visuals = light_visuals();
+        let expected = visuals.panel_fill.to_normalized_gamma_f32();
+        use eframe::App as _;
+        assert_eq!(app.clear_color(&visuals), expected);
+    }
+
+    #[test]
+    fn clear_color_matches_panel_fill_for_dark_visuals() {
+        let app = make_app_with_entries(vec![]);
+        let visuals = egui::Visuals::dark();
+        let expected = visuals.panel_fill.to_normalized_gamma_f32();
+        use eframe::App as _;
+        assert_eq!(app.clear_color(&visuals), expected);
+    }
+
+    #[test]
+    fn clear_color_light_is_not_near_black() {
+        let app = make_app_with_entries(vec![]);
+        let visuals = light_visuals();
+        use eframe::App as _;
+        let [r, g, b, _] = app.clear_color(&visuals);
+        // All channels should be above 0.9 (warm cream, not the hardcoded dark 12/255 ≈ 0.047).
+        assert!(r > 0.9 && g > 0.9 && b > 0.9, "light clear_color should be near-white, got {r},{g},{b}");
+    }
+
+    // ── apply_theme ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_theme_light_sets_light_preference() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, &common::Theme::Light);
+        let pref = ctx.options(|o| o.theme_preference);
+        assert_eq!(pref, egui::ThemePreference::Light);
+    }
+
+    #[test]
+    fn apply_theme_dark_sets_dark_preference() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, &common::Theme::Dark);
+        let pref = ctx.options(|o| o.theme_preference);
+        assert_eq!(pref, egui::ThemePreference::Dark);
+    }
+
+    #[test]
+    fn apply_theme_system_sets_system_preference() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, &common::Theme::System);
+        let pref = ctx.options(|o| o.theme_preference);
+        assert_eq!(pref, egui::ThemePreference::System);
+    }
+
+    #[test]
+    fn apply_theme_light_stores_warm_panel_fill() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, &common::Theme::Light);
+        let panel_fill = ctx.options(|o| o.light_style.visuals.panel_fill);
+        let expected = light_visuals().panel_fill;
+        assert_eq!(panel_fill, expected);
+    }
+
+    #[test]
+    fn apply_theme_light_panel_fill_is_warm_not_cold_gray() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, &common::Theme::Light);
+        let [r, _, b, _] = ctx.options(|o| o.light_style.visuals.panel_fill.to_array());
+        assert!(r > b, "stored light visuals should have warm panel fill (more red than blue)");
+    }
+
+    // ── focus_decision state machine ──────────────────────────────────────────
+
+    #[test]
+    fn focus_decision_focused_never_had_focus_marks_focused() {
+        assert_eq!(
+            focus_decision(true, false),
+            FocusDecision::MarkFocused
+        );
+    }
+
+    #[test]
+    fn focus_decision_focused_already_had_focus_marks_focused() {
+        assert_eq!(
+            focus_decision(true, true),
+            FocusDecision::MarkFocused
+        );
+    }
+
+    #[test]
+    fn focus_decision_unfocused_had_focus_closes() {
+        // User clicked outside after the window was active — should close.
+        assert_eq!(
+            focus_decision(false, true),
+            FocusDecision::Close
+        );
+    }
+
+    #[test]
+    fn focus_decision_unfocused_never_had_focus_requests_focus() {
+        // Window just opened and the WM hasn't granted focus yet — ask for it.
+        assert_eq!(
+            focus_decision(false, false),
+            FocusDecision::RequestFocus
+        );
     }
 }

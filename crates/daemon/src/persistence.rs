@@ -31,7 +31,14 @@ pub struct PersistenceHandle {
 
 impl PersistenceHandle {
     pub fn open() -> Result<(PersistenceHandle, thread::JoinHandle<()>)> {
-        Self::open_with_connection(Connection::open(db_path())?)
+        Self::open_at(db_path())
+    }
+
+    pub fn open_at(path: PathBuf) -> Result<(PersistenceHandle, thread::JoinHandle<()>)> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        Self::open_with_connection(Connection::open(path)?)
     }
 
     pub fn open_in_memory() -> Result<(PersistenceHandle, thread::JoinHandle<()>)> {
@@ -167,6 +174,7 @@ mod tests {
     use super::*;
     use common::ContentPayload;
     use std::time::SystemTime;
+    use tempfile::tempdir;
 
     fn make_entry(id: u64, text: &str, pinned: bool) -> ClipboardEntry {
         ClipboardEntry {
@@ -239,5 +247,51 @@ mod tests {
         thread.join().unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].pinned);
+    }
+
+    // open_at creates parent directories that do not yet exist
+    #[test]
+    fn open_at_creates_missing_parent_dirs() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("a").join("b").join("c").join("history.db");
+        assert!(!nested.parent().unwrap().exists());
+        let (handle, thread) = PersistenceHandle::open_at(nested.clone()).unwrap();
+        handle.send(PersistenceCommand::Shutdown);
+        thread.join().unwrap();
+        assert!(nested.exists());
+    }
+
+    // open_at on an already-existing directory does not fail
+    #[test]
+    fn open_at_existing_dir_succeeds() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.db");
+        let (handle, thread) = PersistenceHandle::open_at(path).unwrap();
+        handle.send(PersistenceCommand::Shutdown);
+        thread.join().unwrap();
+    }
+
+    // data survives close + reopen (round-trip through the real SQLite file)
+    #[test]
+    fn data_survives_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.db");
+
+        {
+            let (handle, thread) = PersistenceHandle::open_at(path.clone()).unwrap();
+            handle.send(PersistenceCommand::Upsert(make_entry(1, "persistent", false)));
+            let _ = handle.load_all(); // flush: LoadAll is synchronous
+            handle.send(PersistenceCommand::Shutdown);
+            thread.join().unwrap();
+        }
+
+        let (handle, thread) = PersistenceHandle::open_at(path).unwrap();
+        let entries = handle.load_all();
+        handle.send(PersistenceCommand::Shutdown);
+        thread.join().unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, EntryId(1));
+        assert!(matches!(&entries[0].payload, ContentPayload::PlainText(t) if t == "persistent"));
     }
 }

@@ -23,6 +23,8 @@ impl SearchBar {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, focus_request: bool) -> bool {
+        use crate::style::{RADIUS_SEARCH, SPACE_M, SPACE_XS};
+
         let old_query = self.query.clone();
 
         // Handle Ctrl+F
@@ -30,15 +32,29 @@ impl SearchBar {
             self.focus_requested = true;
         }
 
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut self.query)
-                .hint_text("Search...")
-                .desired_width(f32::INFINITY),
-        );
+        let visuals = ui.visuals().clone();
+        let frame = egui::Frame::new()
+            .fill(visuals.extreme_bg_color)
+            .stroke(visuals.widgets.noninteractive.bg_stroke)
+            .corner_radius(egui::CornerRadius::same(RADIUS_SEARCH))
+            .inner_margin(egui::Margin::symmetric(SPACE_M as i8, SPACE_XS as i8));
 
-        if focus_request || self.focus_requested {
-            response.request_focus();
-            self.focus_requested = false;
+        let mut response_opt = None;
+        frame.show(ui, |ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.query)
+                    .hint_text("🔍  Search clipboard…")
+                    .frame(egui::Frame::new())
+                    .desired_width(f32::INFINITY),
+            );
+            response_opt = Some(resp);
+        });
+
+        if let Some(response) = response_opt {
+            if focus_request || self.focus_requested {
+                response.request_focus();
+                self.focus_requested = false;
+            }
         }
 
         self.query != old_query

@@ -1,13 +1,12 @@
 pub mod app;
 pub mod components;
 pub mod ipc_client;
+pub mod style;
 pub mod window;
 
 use app::CopieurApp;
 
 pub fn ui_main(socket_path: &str) {
-    let cursor_pos = window::get_cursor_pos();
-
     let config = {
         let mut ipc = ipc_client::IpcClient::connect_to(socket_path).ok();
         let ipc_config = ipc.as_mut().and_then(|c| {
@@ -22,7 +21,13 @@ pub fn ui_main(socket_path: &str) {
         ipc_config.unwrap_or_else(|| config::load().unwrap_or_default())
     };
 
-    let options = window::build_native_options(cursor_pos, &config);
+    // Query screen dimensions via XCB so we can pass a position hint.
+    // On pure Wayland (no DISPLAY) this returns None and the compositor
+    // decides placement — for "Center of screen" that is fine because
+    // GNOME centers new windows by default.
+    let (_, screen_size) = window::get_display_info();
+
+    let options = window::build_native_options(screen_size, &config);
     let socket_path = socket_path.to_string();
 
     if let Err(e) = eframe::run_native(

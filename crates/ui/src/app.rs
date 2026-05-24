@@ -385,7 +385,6 @@ impl CopyslApp {
 ///
 /// 2. A monochrome emoji font (NotoEmoji-Regular from the system) placed right
 ///    after the sans font.  This may cover more emoji than egui's bundled copy.
-///    Colour emoji fonts (CBDT/CBLC) are not supported by egui's renderer.
 ///
 /// If neither is found the function falls through and `ctx.set_fonts` is still
 /// called with the default definitions (no-op equivalent, but consistent).
@@ -425,11 +424,12 @@ pub fn setup_fonts(ctx: &egui::Context) {
 
     // ── 2. System emoji font ─────────────────────────────────────────────────
     let emoji_candidates: &[&str] = &[
-        "/usr/share/fonts/google-noto-emoji/NotoEmoji-Regular.ttf", // Fedora
-        "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",     // Debian / Ubuntu
+        "/usr/share/fonts/google-noto-emoji-fonts/NotoEmoji-Regular.ttf", // Fedora
+        "/usr/share/fonts/google-noto-emoji/NotoEmoji-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",           // Debian / Ubuntu
         "/usr/share/fonts/noto-emoji/NotoEmoji-Regular.ttf",
         "/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
-        "/usr/share/fonts/TTF/NotoEmoji-Regular.ttf",               // Arch
+        "/usr/share/fonts/TTF/NotoEmoji-Regular.ttf",                     // Arch
     ];
     for path in emoji_candidates {
         if let Ok(data) = std::fs::read(path) {

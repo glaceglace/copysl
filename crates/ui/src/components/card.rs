@@ -1,6 +1,7 @@
 use std::time::Duration;
 use common::{ClipboardEntry, ContentPayload};
 use crate::style::{RADIUS_CARD, SPACE_M};
+use crate::emoji::EmojiRenderer;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CardAction {
@@ -66,6 +67,7 @@ pub fn show_card(
     selected: bool,
     scroll_to_me: bool,
     texture: Option<&egui::TextureHandle>,
+    emoji: &mut EmojiRenderer,
 ) -> Option<CardAction> {
     let mut action = None;
 
@@ -110,7 +112,7 @@ pub fn show_card(
                 match &entry.payload {
                     ContentPayload::PlainText(text) => {
                         for line in preview_lines(text, 4) {
-                            ui.add(egui::Label::new(line).truncate())
+                            emoji.render_line(ui, &line)
                                 .on_hover_text(text.as_str());
                         }
                     }

@@ -1,5 +1,6 @@
 pub mod app;
 pub mod components;
+pub mod emoji;
 pub mod ipc_client;
 pub mod style;
 pub mod window;

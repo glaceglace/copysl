@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use common::{ClipboardEntry, ContentPayload, EntryId};
 use crate::components::card::{CardAction, show_card};
+use crate::emoji::EmojiRenderer;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CardListAction {
@@ -22,6 +23,9 @@ pub struct CardList {
     /// Decoded GPU textures for image entries, keyed by entry id.
     /// Populated lazily on first render; dropped when the entry is deleted.
     texture_cache: HashMap<EntryId, egui::TextureHandle>,
+    /// Color emoji renderer — loads NotoColorEmoji on first construction and
+    /// caches per-codepoint textures so emoji render in full color.
+    emoji: EmojiRenderer,
 }
 
 impl CardList {
@@ -31,6 +35,7 @@ impl CardList {
             prev_filtered_len: 0,
             needs_scroll: false,
             texture_cache: HashMap::new(),
+            emoji: EmojiRenderer::new(),
         }
     }
 
@@ -122,7 +127,7 @@ impl CardList {
                         }
                     }
                     let texture = self.texture_cache.get(&entry.id);
-                    let card_action = show_card(ui, entry, selected, scroll, texture);
+                    let card_action = show_card(ui, entry, selected, scroll, texture, &mut self.emoji);
                     if let Some(card_action) = card_action {
                         action = Some(match card_action {
                             CardAction::Paste => CardListAction::Paste(entry.id),

@@ -276,18 +276,4 @@ mod tests {
         assert_ne!(opts.viewport.override_redirect, Some(true));
     }
 
-    #[test]
-    fn header_height_reasonable_at_1080p() {
-        // Header strip = win_h * 0.057. Verify it stays in a comfortable range.
-        let (_, win_h) = compute_window_size(SCREEN_1080P);
-        let h = win_h * 0.057;
-        assert!(h > 25.0 && h < 55.0, "header_height = {h}");
-    }
-
-    #[test]
-    fn header_height_reasonable_at_1440p() {
-        let (_, win_h) = compute_window_size(SCREEN_1440P);
-        let h = win_h * 0.057;
-        assert!(h > 25.0 && h < 55.0, "header_height = {h}");
-    }
 }

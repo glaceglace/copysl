@@ -25,6 +25,13 @@ pub struct CopyslApp {
     /// after that do we close on focus loss (avoids closing at startup
     /// before the OS delivers the initial focus event).
     had_focus: bool,
+    /// Set when StartDrag is sent so check_focus() does not close the window
+    /// while the WM temporarily holds focus during a title-move operation.
+    dragging: bool,
+    /// Focus state from the previous frame, used to detect the false→true
+    /// transition so we clear `dragging` only when focus actually returns,
+    /// not on every normally-focused frame.
+    was_focused: bool,
 }
 
 struct ToolWarnings {
@@ -53,6 +60,8 @@ impl CopyslApp {
                     )),
                     tool_warnings: None,
                     had_focus: false,
+                    dragging: false,
+                    was_focused: false,
                 };
                 setup_fonts(&cc.egui_ctx);
                 apply_theme(&cc.egui_ctx, &app.config.theme);
@@ -101,6 +110,8 @@ impl CopyslApp {
                     startup_error: None,
                     tool_warnings,
                     had_focus: false,
+                    dragging: false,
+                    was_focused: false,
                 }
             }
         }
@@ -195,7 +206,7 @@ impl eframe::App for CopyslApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Poll daemon push notifications every frame (non-UI logic only)
+        // Poll daemon for incoming clipboard entries
         if let Some(ipc) = self.ipc.as_mut() {
             if let Some(DaemonResponse::NewEntry(entry)) = ipc.try_recv_push() {
                 self.entries.insert(0, entry);
@@ -203,14 +214,7 @@ impl eframe::App for CopyslApp {
             }
         }
 
-        // Close when the window loses focus (user clicked outside).
-        let focused = ctx.input(|i| i.focused);
-        match focus_decision(focused, self.had_focus) {
-            FocusDecision::MarkFocused => self.had_focus = true,
-            FocusDecision::Close => self.close(ctx),
-            FocusDecision::RequestFocus => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
-        }
-
+        self.check_focus(ctx);
         ctx.request_repaint();
     }
 
@@ -220,6 +224,49 @@ impl eframe::App for CopyslApp {
 }
 
 impl CopyslApp {
+    /// Close the window when it loses focus (user clicked outside).
+    ///
+    /// `had_focus` gates the check so we don't close before the WM delivers
+    /// the initial focus event at startup.  With native decorations the WM
+    /// keeps focus on the client during title-bar drags, so no extra guard
+    /// is needed.
+    fn check_focus(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|i| i.focused);
+        if focused {
+            self.had_focus = true;
+            // Clear dragging only on the false→true transition (focus just returned).
+            // Clearing it every focused frame would race: the WM may take several
+            // frames to steal focus after StartDrag, and we'd reset the flag too early.
+            if !self.was_focused {
+                self.dragging = false;
+            }
+        } else if self.had_focus && !self.dragging {
+            // Focus lost. Check if a left primary-button press occurred this same
+            // frame — that is the WM reacting to a drag-start on the title bar.
+            // On some X11 WMs the FocusOut arrives in the same frame as the click,
+            // before render() has had a chance to set dragging=true.
+            let left_click = ctx.input(|i| {
+                i.events.iter().any(|e| matches!(
+                    e,
+                    egui::Event::PointerButton {
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        ..
+                    }
+                ))
+            });
+            if left_click {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                self.dragging = true;
+            } else {
+                self.close(ctx);
+            }
+        } else if !self.had_focus {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        self.was_focused = focused;
+    }
+
     fn render(&mut self, ui: &mut egui::Ui) {
         use crate::style::SPACE_M;
 
@@ -302,33 +349,55 @@ impl CopyslApp {
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(SPACE_M as i8, 0))
             .show(ui, |ui| {
-                let header_height = ctx.screen_rect().height() * 0.057;
+                // ── Custom title bar ─────────────────────────────────────────
+                let header_height = ctx.screen_rect().height() * 0.04;
+                let header_rect = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(ui.available_width(), header_height),
+                );
+                ui.allocate_rect(header_rect, egui::Sense::hover());
 
-                // Header strip: drag icon + title + gear button
-                let header_resp = ui.horizontal(|ui| {
-                    ui.set_min_height(header_height);
-                    ui.label(
-                        egui::RichText::new("≡")
-                            .color(ui.visuals().weak_text_color()),
-                    );
-                    ui.label(
-                        egui::RichText::new("Clipboard History")
-                            .text_style(egui::TextStyle::Body)
-                            .strong(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new("⚙").frame(false)).clicked() {
-                            self.show_settings = !self.show_settings;
-                            if self.show_settings {
-                                self.settings_panel = SettingsPanel::new(self.config.clone());
-                            }
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(header_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                child.set_min_height(header_height);
+                let gear_resp = child.add(egui::Button::new("⚙").frame(false));
+                let gear_clicked = gear_resp.clicked();
+
+                // Drag zone is the header to the right of the gear button.
+                let drag_rect = egui::Rect::from_min_max(
+                    egui::pos2(gear_resp.rect.max.x, header_rect.min.y),
+                    header_rect.max,
+                );
+                let drag_resp = ui.interact(
+                    drag_rect,
+                    ui.id().with("title_drag"),
+                    egui::Sense::click_and_drag(),
+                );
+                // Reliable left-vs-right detection:
+                //   is_pointer_button_down_on() — fires immediately on press, position-aware
+                //   PointerButton event          — one-shot, button-specific (never true for right-click)
+                // Both must be true on the same frame, so neither alone is sufficient.
+                let left_pressed_this_frame = ctx.input(|i| {
+                    i.events.iter().any(|e| matches!(
+                        e,
+                        egui::Event::PointerButton {
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            ..
                         }
-                    });
-                }).response;
-
-                // Clicking and dragging the header strip moves the borderless window
-                if header_resp.is_pointer_button_down_on() {
+                    ))
+                });
+                if drag_resp.is_pointer_button_down_on() && left_pressed_this_frame {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    self.dragging = true;
+                }
+
+                if gear_clicked {
+                    self.show_settings = true;
+                    self.settings_panel = SettingsPanel::new(self.config.clone());
                 }
 
                 ui.separator();
@@ -354,7 +423,6 @@ impl CopyslApp {
                         }
                     }
                 } else {
-                    // Search bar
                     let query_changed = self.search_bar.show(ui, true);
                     if query_changed {
                         self.refilter();
@@ -511,30 +579,6 @@ pub fn apply_theme(ctx: &egui::Context, theme: &common::Theme) {
     });
 }
 
-/// What the focus-tracking logic wants to do on a given frame.
-#[derive(Debug, PartialEq)]
-pub enum FocusDecision {
-    /// Window now has focus — record it so we can detect future loss.
-    MarkFocused,
-    /// Window had focus before but just lost it — close.
-    Close,
-    /// Window has never received focus — keep asking the WM for it.
-    RequestFocus,
-}
-
-/// Pure function: decides what to do based on current and prior focus state.
-///
-/// Extracted so the state machine can be unit-tested without an egui context.
-pub fn focus_decision(focused: bool, had_focus: bool) -> FocusDecision {
-    if focused {
-        FocusDecision::MarkFocused
-    } else if had_focus {
-        FocusDecision::Close
-    } else {
-        FocusDecision::RequestFocus
-    }
-}
-
 /// Render an install hint as a selectable, monospace code block with a
 /// copy button in the top-right corner.
 fn tool_hint_block(ui: &mut egui::Ui, hint: &str) {
@@ -580,6 +624,8 @@ mod tests {
             startup_error: None,
             tool_warnings: None,
             had_focus: false,
+            dragging: false,
+            was_focused: false,
         }
     }
 
@@ -798,42 +844,6 @@ mod tests {
         assert!(r > b, "stored light visuals should have warm panel fill (more red than blue)");
     }
 
-    // ── focus_decision state machine ──────────────────────────────────────────
-
-    #[test]
-    fn focus_decision_focused_never_had_focus_marks_focused() {
-        assert_eq!(
-            focus_decision(true, false),
-            FocusDecision::MarkFocused
-        );
-    }
-
-    #[test]
-    fn focus_decision_focused_already_had_focus_marks_focused() {
-        assert_eq!(
-            focus_decision(true, true),
-            FocusDecision::MarkFocused
-        );
-    }
-
-    #[test]
-    fn focus_decision_unfocused_had_focus_closes() {
-        // User clicked outside after the window was active — should close.
-        assert_eq!(
-            focus_decision(false, true),
-            FocusDecision::Close
-        );
-    }
-
-    #[test]
-    fn focus_decision_unfocused_never_had_focus_requests_focus() {
-        // Window just opened and the WM hasn't granted focus yet — ask for it.
-        assert_eq!(
-            focus_decision(false, false),
-            FocusDecision::RequestFocus
-        );
-    }
-
     // ── emoji_insert_pos ──────────────────────────────────────────────────────
 
     #[test]
@@ -912,4 +922,159 @@ mod tests {
         setup_fonts(&ctx); // idempotent — must not crash or deadlock
         assert!(!ctx.style().interaction.selectable_labels);
     }
+
+    // ── check_focus ───────────────────────────────────────────────────────────
+
+    fn left_click_event() -> egui::Event {
+        egui::Event::PointerButton {
+            pos: egui::Pos2::new(100.0, 20.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    fn right_click_event() -> egui::Event {
+        egui::Event::PointerButton {
+            pos: egui::Pos2::new(100.0, 20.0),
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// Run one synthetic frame through `check_focus` and return the viewport
+    /// commands it produced (Close, StartDrag, Focus, etc.).
+    fn run_focus_frame(
+        app: &mut CopyslApp,
+        focused: bool,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::ViewportCommand> {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput {
+            focused,
+            events,
+            ..Default::default()
+        });
+        app.check_focus(&ctx);
+        let output = ctx.end_pass();
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|vo| vo.commands.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn check_focus_sets_had_focus_when_focused() {
+        let mut app = make_app_with_entries(vec![]);
+        assert!(!app.had_focus);
+        run_focus_frame(&mut app, true, vec![]);
+        assert!(app.had_focus);
+    }
+
+    #[test]
+    fn check_focus_clears_dragging_on_false_to_true_transition() {
+        let mut app = make_app_with_entries(vec![]);
+        app.dragging = true;
+        // was_focused = false (default) → this is a false→true transition
+        run_focus_frame(&mut app, true, vec![]);
+        assert!(!app.dragging, "dragging must be cleared when focus returns");
+    }
+
+    #[test]
+    fn check_focus_keeps_dragging_when_continuously_focused() {
+        let mut app = make_app_with_entries(vec![]);
+        app.had_focus = true;
+        app.was_focused = true; // already focused last frame — not a transition
+        app.dragging = true;
+        run_focus_frame(&mut app, true, vec![]);
+        assert!(app.dragging, "dragging must not be cleared mid-drag while focused");
+    }
+
+    #[test]
+    fn check_focus_was_focused_becomes_true_after_focused_frame() {
+        let mut app = make_app_with_entries(vec![]);
+        run_focus_frame(&mut app, true, vec![]);
+        assert!(app.was_focused);
+    }
+
+    #[test]
+    fn check_focus_was_focused_becomes_false_after_unfocused_frame() {
+        let mut app = make_app_with_entries(vec![]);
+        app.had_focus = true;
+        app.dragging = true; // suppress close so we can check was_focused
+        run_focus_frame(&mut app, false, vec![]);
+        assert!(!app.was_focused);
+    }
+
+    #[test]
+    fn check_focus_sends_close_on_focus_loss_without_click() {
+        let mut app = make_app_with_entries(vec![]);
+        app.had_focus = true;
+        let cmds = run_focus_frame(&mut app, false, vec![]);
+        assert!(
+            cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "expected Close in {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_sends_start_drag_on_same_frame_left_click() {
+        let mut app = make_app_with_entries(vec![]);
+        app.had_focus = true;
+        let cmds = run_focus_frame(&mut app, false, vec![left_click_event()]);
+        assert!(
+            cmds.iter().any(|c| matches!(c, egui::ViewportCommand::StartDrag)),
+            "expected StartDrag in {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "must not Close on drag-start frame"
+        );
+        assert!(app.dragging, "dragging flag must be set after StartDrag");
+    }
+
+    #[test]
+    fn check_focus_no_close_while_dragging() {
+        let mut app = make_app_with_entries(vec![]);
+        app.had_focus = true;
+        app.dragging = true;
+        let cmds = run_focus_frame(&mut app, false, vec![]);
+        assert!(
+            !cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "must not close while dragging flag is set"
+        );
+    }
+
+    #[test]
+    fn check_focus_requests_focus_before_first_focus() {
+        let mut app = make_app_with_entries(vec![]);
+        // had_focus = false (default), focused = false → request focus at startup
+        let cmds = run_focus_frame(&mut app, false, vec![]);
+        assert!(
+            cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Focus)),
+            "expected Focus request in {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "must not close before first focus"
+        );
+    }
+
+    #[test]
+    fn check_focus_right_click_does_not_suppress_close() {
+        let mut app = make_app_with_entries(vec![]);
+        app.had_focus = true;
+        let cmds = run_focus_frame(&mut app, false, vec![right_click_event()]);
+        assert!(
+            cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "right-click must not prevent close"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, egui::ViewportCommand::StartDrag)),
+            "right-click must not trigger StartDrag"
+        );
+    }
+
 }

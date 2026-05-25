@@ -156,14 +156,10 @@ pub fn show_card(
                         }
                     }
                     ContentPayload::RichText { plain_preview, .. } => {
-                        let lbl = ui.add(
-                            egui::Label::new(plain_preview.as_str()).truncate(),
-                        );
-                        lbl.on_hover_text(plain_preview.as_str());
-                        ui.label(
-                            egui::RichText::new("HTML")
-                                .text_style(egui::TextStyle::Small),
-                        );
+                        for line in preview_lines(plain_preview, 5) {
+                            emoji.render_line(ui, &line)
+                                .on_hover_text(plain_preview.as_str());
+                        }
                     }
                     ContentPayload::Image { .. } => {
                         if let Some(tex) = texture {

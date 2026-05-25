@@ -5,6 +5,30 @@ use common::ClipboardEntry;
 use common::ContentPayload;
 use crate::focus_tracker::FocusHandle;
 
+// Timestamp (ms since UNIX epoch) of the last paste write.  The clipboard
+// monitor reads this to suppress wl-paste calls right after a paste so the
+// desktop compositor does not show a "clipboard read by wl-paste" notification
+// for content we ourselves just wrote.
+static LAST_PASTE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Mark the start of a paste write so the clipboard monitor suppresses its
+/// wl-paste subprocess for the next 2 seconds.
+pub fn notify_paste_started() {
+    LAST_PASTE_MS.store(now_ms(), std::sync::atomic::Ordering::Release);
+}
+
+/// True when a paste write happened within the last 2 seconds.
+pub fn paste_recently() -> bool {
+    now_ms().saturating_sub(LAST_PASTE_MS.load(std::sync::atomic::Ordering::Acquire)) < 2000
+}
+
 pub mod xdotool;
 pub mod xsendevent;
 pub mod ydotool;
@@ -145,6 +169,46 @@ fn try_xclip(text: &str) -> bool {
     true
 }
 
+/// Try to set `text/html` clipboard content via `wl-copy`.
+#[cfg(not(test))]
+fn try_wl_copy_html(html: &str) -> bool {
+    use std::io::Write;
+    let mut child = match std::process::Command::new("wl-copy")
+        .args(["--type", "text/html"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(html.as_bytes()).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Try to set `text/html` clipboard content via `xclip`.
+#[cfg(not(test))]
+fn try_xclip_html(html: &str) -> bool {
+    use std::io::Write;
+    let mut child = match std::process::Command::new("xclip")
+        .args(["-selection", "clipboard", "-t", "text/html"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(html.as_bytes()).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 pub struct PasteExecutor {
     backend: Box<dyn PasteBackend>,
     focus_tracker: std::sync::Arc<dyn crate::focus_tracker::FocusTracker>,
@@ -171,13 +235,19 @@ impl PasteExecutor {
         #[cfg(not(test))]
         {
             // ── Step 1: write content to the clipboard ───────────────────────
+            // Suppress the clipboard monitor's wl-paste polling for 2 s so that
+            // the desktop compositor does not show a "clipboard read" notification
+            // for content we are about to write.
+            notify_paste_started();
+
             // Prefer a persistent daemon (wl-copy / xclip) so the data outlives
             // this function.  arboard's backend is served by a thread that dies
             // on drop; we keep it alive until after Ctrl+V succeeds.
             let used_persistent = match &entry.payload {
                 ContentPayload::PlainText(t) => try_wl_copy(t) || try_xclip(t),
-                ContentPayload::RichText { plain_preview, .. } => {
-                    try_wl_copy(plain_preview) || try_xclip(plain_preview)
+                ContentPayload::RichText { html, plain_preview } => {
+                    try_wl_copy_html(html) || try_xclip_html(html)
+                        || try_wl_copy(plain_preview) || try_xclip(plain_preview)
                 }
                 ContentPayload::Image { .. } => false,
             };
@@ -191,6 +261,8 @@ impl PasteExecutor {
                     }
                     ContentPayload::RichText { plain_preview, .. } => {
                         clipboard.set_text(plain_preview.clone())?;
+                        // HTML already attempted via wl-copy/xclip above; this is
+                        // plain-text fallback only (arboard has no HTML API).
                     }
                     ContentPayload::Image { data, .. } => {
                         let img = image::load_from_memory(data)
@@ -432,5 +504,49 @@ mod tests {
         };
 
         assert!(executor.paste(&entry).is_ok());
+    }
+
+    // ── notify_paste_started / paste_recently ─────────────────────────────────
+
+    #[test]
+    fn paste_recently_true_immediately_after_notify() {
+        notify_paste_started();
+        assert!(paste_recently(), "should be recent immediately after notify");
+    }
+
+    #[test]
+    fn paste_recently_false_when_last_paste_is_old() {
+        // Store a timestamp 3 seconds in the past — outside the 2-second window.
+        let old_ms = now_ms().saturating_sub(3_000);
+        LAST_PASTE_MS.store(old_ms, std::sync::atomic::Ordering::Release);
+        assert!(!paste_recently(), "3-second-old paste should not count as recent");
+        // Restore a fresh timestamp so other tests aren't affected.
+        notify_paste_started();
+    }
+
+    #[test]
+    fn paste_recently_true_at_1999ms_boundary() {
+        // 1999 ms ago — just inside the 2-second window.
+        let recent_ms = now_ms().saturating_sub(1_999);
+        LAST_PASTE_MS.store(recent_ms, std::sync::atomic::Ordering::Release);
+        assert!(paste_recently(), "1999 ms ago should still count as recent");
+        notify_paste_started();
+    }
+
+    #[test]
+    fn notify_paste_started_updates_timestamp() {
+        // Set an old value, call notify, confirm it moves to a recent value.
+        LAST_PASTE_MS.store(0, std::sync::atomic::Ordering::Release);
+        assert!(!paste_recently(), "timestamp 0 should not be recent");
+        notify_paste_started();
+        assert!(paste_recently(), "after notify, should be recent");
+    }
+
+    #[test]
+    fn paste_recently_false_on_zero_timestamp() {
+        // When LAST_PASTE_MS is 0 (never pasted), now_ms() − 0 >> 2000.
+        LAST_PASTE_MS.store(0, std::sync::atomic::Ordering::Release);
+        assert!(!paste_recently(), "zero timestamp means never pasted → not recent");
+        notify_paste_started(); // restore
     }
 }

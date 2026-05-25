@@ -92,12 +92,119 @@ impl ClipboardReader for RealClipboardReader {
     }
 
     fn read_html(&mut self) -> Option<(String, String)> {
-        None
+        // Skip the subprocess call right after a paste so the desktop compositor
+        // does not show a "clipboard read by wl-paste" notification for content
+        // we just wrote via wl-copy.
+        if crate::paste_executor::paste_recently() {
+            return None;
+        }
+        // Try Wayland (wl-paste) then X11 (xclip).
+        let html = read_html_wl_paste().or_else(read_html_xclip)?;
+        let plain = strip_html_tags(&html);
+        Some((html, plain))
     }
 
     fn read_text(&mut self) -> Option<String> {
         self.clipboard.get_text().ok()
     }
+}
+
+/// Read `text/html` from the Wayland clipboard via `wl-paste`.
+#[cfg(not(test))]
+fn read_html_wl_paste() -> Option<String> {
+    let out = std::process::Command::new("wl-paste")
+        .args(["--type", "text/html", "--no-newline"])
+        .output()
+        .ok()?;
+    if !out.status.success() { return None; }
+    let html = String::from_utf8(out.stdout).ok()?;
+    // Reject empty output or output that looks like plain text (no tags).
+    if html.trim().is_empty() || !html.contains('<') { return None; }
+    Some(html)
+}
+
+/// Read `text/html` from the X11 clipboard via `xclip`.
+#[cfg(not(test))]
+fn read_html_xclip() -> Option<String> {
+    let out = std::process::Command::new("xclip")
+        .args(["-selection", "clipboard", "-t", "text/html", "-o"])
+        .output()
+        .ok()?;
+    if !out.status.success() { return None; }
+    let html = String::from_utf8(out.stdout).ok()?;
+    if html.trim().is_empty() || !html.contains('<') { return None; }
+    Some(html)
+}
+
+/// Strip HTML tags and decode common entities to produce a plain-text preview.
+///
+/// Block-level tags (`<p>`, `<br>`, `<div>`, `<li>`, headings, …) emit `\n`
+/// so that paragraph/line structure is preserved.  Inline tags emit a space.
+/// `<style>`, `<script>`, and `<!-- -->` blocks are skipped entirely.
+pub(crate) fn strip_html_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut s = html;
+
+    while !s.is_empty() {
+        if s.starts_with("<!--") {
+            // Skip comment: <!-- ... -->
+            s = s[4..].find("-->").map_or("", |i| &s[4 + i + 3..]);
+        } else if html_open_tag(s, "style") || html_open_tag(s, "script") {
+            // Skip entire style/script block
+            let tag = if html_open_tag(s, "style") { "style" } else { "script" };
+            let close = format!("</{tag}>");
+            let s_lo = s.to_ascii_lowercase();
+            s = s_lo.find(close.as_str()).map_or("", |i| &s[i + close.len()..]);
+        } else if s.starts_with('<') {
+            // Tag: emit '\n' for block-level, ' ' for inline, then skip to '>'.
+            let sep = block_sep(s);
+            s = s.find('>').map_or("", |i| { out.push(sep); &s[i + 1..] });
+        } else {
+            // Text content up to next '<'
+            match s.find('<') {
+                Some(i) => { out.push_str(&s[..i]); s = &s[i..]; }
+                None    => { out.push_str(s); break; }
+            }
+        }
+    }
+
+    let decoded = out
+        .replace("&amp;",  "&")
+        .replace("&lt;",   "<")
+        .replace("&gt;",   ">")
+        .replace("&nbsp;", " ")
+        .replace("&#39;",  "'")
+        .replace("&quot;", "\"");
+
+    // Collapse spaces within each line; drop blank lines; join with newline.
+    decoded
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// True when `s` starts with `<tag` (case-insensitive) followed by `>`, space, or `/`.
+fn html_open_tag(s: &str, tag: &str) -> bool {
+    let n = 1 + tag.len();
+    s.len() > n
+        && s.as_bytes()[0] == b'<'
+        && s[1..].get(..tag.len()).map_or(false, |t| t.eq_ignore_ascii_case(tag))
+        && matches!(s.as_bytes()[n], b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/')
+}
+
+/// Returns `'\n'` for block-level tags, `' '` for everything else.
+fn block_sep(s: &str) -> char {
+    const BLOCK: &[&str] = &[
+        "p", "br", "div", "h1", "h2", "h3", "h4", "h5", "h6",
+        "li", "tr", "dt", "dd", "blockquote", "pre", "hr",
+    ];
+    // Extract tag name: skip '<' and optional '/' (closing tag).
+    let rest = s[1..].trim_start_matches('/');
+    let end = rest.find(|c: char| c == '>' || c.is_ascii_whitespace() || c == '/').unwrap_or(rest.len());
+    let tag = rest[..end].to_ascii_lowercase();
+    if BLOCK.contains(&tag.as_str()) { '\n' } else { ' ' }
 }
 
 #[cfg(test)]
@@ -402,4 +509,273 @@ mod tests {
         assert_eq!(rgba.dimensions(), (1, 1));
         assert_eq!(rgba.get_pixel(0, 0).0, [255, 0, 0, 255]);
     }
+
+    // -------------------------------------------------------------------------
+    // Tests for strip_html_tags
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn strip_plain_text_unchanged() {
+        assert_eq!(strip_html_tags("hello world"), "hello world");
+    }
+
+    #[test]
+    fn strip_simple_inline_tags() {
+        assert_eq!(strip_html_tags("<b>hello</b> <i>world</i>"), "hello world");
+    }
+
+    #[test]
+    fn strip_skips_style_block() {
+        let html = "<style>body { color: red; }</style><p>Hello</p>";
+        assert_eq!(strip_html_tags(html), "Hello");
+    }
+
+    #[test]
+    fn strip_skips_script_block() {
+        let html = "<script>alert('xss')</script><p>Safe</p>";
+        assert_eq!(strip_html_tags(html), "Safe");
+    }
+
+    #[test]
+    fn strip_skips_html_comment() {
+        let html = "<!-- hidden -->visible";
+        assert_eq!(strip_html_tags(html), "visible");
+    }
+
+    #[test]
+    fn strip_full_browser_html() {
+        let html = "<html><head><style>p{color:red}</style></head>\
+                    <body><p>Hello <b>world</b></p></body></html>";
+        assert_eq!(strip_html_tags(html), "Hello world");
+    }
+
+    #[test]
+    fn strip_decodes_entities() {
+        assert_eq!(strip_html_tags("A &amp; B &lt;3 &gt;"), "A & B <3 >");
+    }
+
+    #[test]
+    fn strip_collapses_spaces_within_line() {
+        assert_eq!(strip_html_tags("<p>  hello   world  </p>"), "hello world");
+    }
+
+    #[test]
+    fn strip_paragraphs_become_separate_lines() {
+        let html = "<p>First</p><p>Second</p><p>Third</p>";
+        let result = strip_html_tags(html);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines, ["First", "Second", "Third"]);
+    }
+
+    #[test]
+    fn strip_br_inserts_newline() {
+        let html = "Line one<br>Line two<br/>Line three";
+        let result = strip_html_tags(html);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines, ["Line one", "Line two", "Line three"]);
+    }
+
+    #[test]
+    fn strip_div_inserts_newline() {
+        let html = "<div>Alpha</div><div>Beta</div>";
+        let result = strip_html_tags(html);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines.contains(&"Alpha") && lines.contains(&"Beta"),
+            "expected separate lines, got: {:?}", result);
+    }
+
+    #[test]
+    fn strip_list_items_become_lines() {
+        let html = "<ul><li>One</li><li>Two</li><li>Three</li></ul>";
+        let result = strip_html_tags(html);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines.contains(&"One"), "missing 'One' in {:?}", result);
+        assert!(lines.contains(&"Two"), "missing 'Two' in {:?}", result);
+    }
+
+    // ── strip_html_tags: additional edge cases ────────────────────────────────
+
+    #[test]
+    fn strip_empty_input_returns_empty() {
+        assert_eq!(strip_html_tags(""), "");
+    }
+
+    #[test]
+    fn strip_only_tags_returns_empty() {
+        assert_eq!(strip_html_tags("<html><body></body></html>"), "");
+    }
+
+    #[test]
+    fn strip_unclosed_tag_does_not_panic() {
+        // Unclosed '<' — should not panic, just stop at the unterminated tag.
+        let _ = strip_html_tags("hello <b world");
+    }
+
+    #[test]
+    fn strip_uppercase_tags_treated_as_inline() {
+        // <B> and <I> are uppercase inline tags — produce spaces, not newlines.
+        let result = strip_html_tags("<B>bold</B> <I>italic</I>");
+        assert_eq!(result, "bold italic");
+    }
+
+    #[test]
+    fn strip_uppercase_block_tags_produce_newlines() {
+        // <P> and <BR> in uppercase must still be block-level.
+        let result = strip_html_tags("<P>One</P><P>Two</P>");
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines.contains(&"One") && lines.contains(&"Two"),
+            "expected two lines, got: {:?}", result);
+    }
+
+    #[test]
+    fn strip_headings_produce_newlines() {
+        let html = "<h1>Title</h1><h2>Subtitle</h2>";
+        let result = strip_html_tags(html);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines.contains(&"Title"), "h1 missing in {:?}", result);
+        assert!(lines.contains(&"Subtitle"), "h2 missing in {:?}", result);
+    }
+
+    #[test]
+    fn strip_pre_block_produces_newline() {
+        let html = "<pre>code here</pre><p>text</p>";
+        let result = strip_html_tags(html);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines.contains(&"code here"), "pre content missing in {:?}", result);
+        assert!(lines.contains(&"text"), "p content missing in {:?}", result);
+    }
+
+    #[test]
+    fn strip_nbsp_entity_decoded() {
+        assert_eq!(strip_html_tags("hello&nbsp;world"), "hello world");
+    }
+
+    #[test]
+    fn strip_quot_entity_decoded() {
+        assert_eq!(strip_html_tags("say &quot;hi&quot;"), "say \"hi\"");
+    }
+
+    #[test]
+    fn strip_apos_entity_decoded() {
+        assert_eq!(strip_html_tags("it&#39;s"), "it's");
+    }
+
+    #[test]
+    fn strip_nested_style_inside_body() {
+        // Some rich-text editors emit <style> mid-document.
+        let html = "<p>Before</p><style>.cls{font:bold}</style><p>After</p>";
+        let result = strip_html_tags(html);
+        assert!(!result.contains("font"), "CSS leaked into preview: {result}");
+        assert!(result.contains("Before") && result.contains("After"),
+            "content missing: {result}");
+    }
+
+    #[test]
+    fn strip_comment_mid_text() {
+        let html = "start <!-- ignored section --> end";
+        assert_eq!(strip_html_tags(html), "start end");
+    }
+
+    #[test]
+    fn strip_self_closing_br_produces_newline() {
+        let html = "A<br />B";
+        let result = strip_html_tags(html);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines, ["A", "B"], "self-closing <br /> should split lines");
+    }
+
+    // ── html_open_tag ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn html_open_tag_matches_exact() {
+        assert!(html_open_tag("<style>", "style"));
+        assert!(html_open_tag("<script>", "script"));
+    }
+
+    #[test]
+    fn html_open_tag_matches_with_attrs() {
+        assert!(html_open_tag("<style type=\"text/css\">", "style"));
+        assert!(html_open_tag("<script src=\"x.js\">", "script"));
+    }
+
+    #[test]
+    fn html_open_tag_matches_self_closing() {
+        assert!(html_open_tag("<style/>", "style"));
+    }
+
+    #[test]
+    fn html_open_tag_case_insensitive() {
+        assert!(html_open_tag("<STYLE>", "style"));
+        assert!(html_open_tag("<Style>", "style"));
+    }
+
+    #[test]
+    fn html_open_tag_does_not_match_prefix() {
+        // <stylesheet> must NOT match tag "style"
+        assert!(!html_open_tag("<stylesheet>", "style"));
+    }
+
+    #[test]
+    fn html_open_tag_does_not_match_closing_tag() {
+        // </style> starts with '<' + '/' — open-tag check should still return true
+        // because we call it on the raw `s` pointer before any '/'-stripping;
+        // actually the fn checks s[1..] against tag, and '</style>' has '/' at [1],
+        // so it should NOT match for "style".
+        assert!(!html_open_tag("</style>", "style"));
+    }
+
+    #[test]
+    fn html_open_tag_empty_string_does_not_panic() {
+        assert!(!html_open_tag("", "style"));
+        assert!(!html_open_tag("<", "style"));
+    }
+
+    // ── block_sep ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn block_sep_p_is_newline() {
+        assert_eq!(block_sep("<p>"), '\n');
+        assert_eq!(block_sep("</p>"), '\n');
+    }
+
+    #[test]
+    fn block_sep_br_is_newline() {
+        assert_eq!(block_sep("<br>"), '\n');
+        assert_eq!(block_sep("<br/>"), '\n');
+        assert_eq!(block_sep("<br />"), '\n');
+    }
+
+    #[test]
+    fn block_sep_div_is_newline() {
+        assert_eq!(block_sep("<div>"), '\n');
+        assert_eq!(block_sep("</div>"), '\n');
+    }
+
+    #[test]
+    fn block_sep_headings_are_newline() {
+        for tag in ["<h1>", "<h2>", "<h3>", "<h4>", "<h5>", "<h6>"] {
+            assert_eq!(block_sep(tag), '\n', "{tag} should be block");
+        }
+    }
+
+    #[test]
+    fn block_sep_li_tr_are_newline() {
+        assert_eq!(block_sep("<li>"), '\n');
+        assert_eq!(block_sep("<tr>"), '\n');
+    }
+
+    #[test]
+    fn block_sep_inline_tags_are_space() {
+        for tag in ["<b>", "<i>", "<span>", "<a>", "<strong>", "<em>"] {
+            assert_eq!(block_sep(tag), ' ', "{tag} should be inline");
+        }
+    }
+
+    #[test]
+    fn block_sep_uppercase_block_is_newline() {
+        assert_eq!(block_sep("<P>"), '\n');
+        assert_eq!(block_sep("<BR>"), '\n');
+        assert_eq!(block_sep("<DIV>"), '\n');
+    }
+
 }

@@ -128,12 +128,19 @@ pub fn select_backend(display: DisplayServer) -> Box<dyn PasteBackend> {
     }
 }
 
-/// Try to set clipboard text via `wl-copy` (wl-clipboard package).
-/// wl-copy forks a child daemon that serves the clipboard indefinitely.
+/// Spawn a clipboard-serving child, write `data` to its stdin, then reap the
+/// child in a background thread.
+///
+/// `wl-copy` and `xclip` stay running after stdin closes to serve clipboard
+/// requests from other apps.  They exit only when the Wayland/X11 compositor
+/// sends a selection-cancelled event (i.e. a new owner takes the clipboard).
+/// If we simply drop the `Child` handle without calling `wait()`, every
+/// cancelled clipboard server becomes a zombie process.  The background thread
+/// calls `wait()` so zombies are reaped as soon as each server exits.
 #[cfg(not(test))]
-fn try_wl_copy(text: &str) -> bool {
+fn spawn_clipboard_server(cmd: &mut std::process::Command, data: &[u8]) -> bool {
     use std::io::Write;
-    let mut child = match std::process::Command::new("wl-copy")
+    let mut child = match cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -143,78 +150,44 @@ fn try_wl_copy(text: &str) -> bool {
         Err(_) => return false,
     };
     if let Some(mut stdin) = child.stdin.take() {
-        if stdin.write_all(text.as_bytes()).is_err() {
+        if stdin.write_all(data).is_err() {
+            let _ = child.kill();
             return false;
         }
     }
+    // Reap the child once it exits (prevents zombie accumulation).
+    std::thread::spawn(move || { let _ = child.wait(); });
     true
 }
 
+/// Try to set clipboard text via `wl-copy` (wl-clipboard package).
+#[cfg(not(test))]
+fn try_wl_copy(text: &str) -> bool {
+    spawn_clipboard_server(&mut std::process::Command::new("wl-copy"), text.as_bytes())
+}
+
 /// Try to set clipboard text via `xclip` (xclip package).
-/// xclip stays running and serves the clipboard until another app takes ownership.
 #[cfg(not(test))]
 fn try_xclip(text: &str) -> bool {
-    use std::io::Write;
-    let mut child = match std::process::Command::new("xclip")
-        .args(["-selection", "clipboard"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        if stdin.write_all(text.as_bytes()).is_err() {
-            return false;
-        }
-    }
-    true
+    let mut cmd = std::process::Command::new("xclip");
+    spawn_clipboard_server(cmd.args(["-selection", "clipboard"]), text.as_bytes())
 }
 
 /// Try to set `text/html` clipboard content via `wl-copy`.
 #[cfg(not(test))]
 fn try_wl_copy_html(html: &str) -> bool {
-    use std::io::Write;
-    let mut child = match std::process::Command::new("wl-copy")
-        .args(["--type", "text/html"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        if stdin.write_all(html.as_bytes()).is_err() {
-            return false;
-        }
-    }
-    true
+    let mut cmd = std::process::Command::new("wl-copy");
+    spawn_clipboard_server(cmd.args(["--type", "text/html"]), html.as_bytes())
 }
 
 /// Try to set `text/html` clipboard content via `xclip`.
 #[cfg(not(test))]
 fn try_xclip_html(html: &str) -> bool {
-    use std::io::Write;
-    let mut child = match std::process::Command::new("xclip")
-        .args(["-selection", "clipboard", "-t", "text/html"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        if stdin.write_all(html.as_bytes()).is_err() {
-            return false;
-        }
-    }
-    true
+    let mut cmd = std::process::Command::new("xclip");
+    spawn_clipboard_server(
+        cmd.args(["-selection", "clipboard", "-t", "text/html"]),
+        html.as_bytes(),
+    )
 }
 
 pub struct PasteExecutor {

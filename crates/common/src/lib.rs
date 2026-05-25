@@ -196,6 +196,8 @@ pub fn write_frame<W: std::io::Write, T: serde::Serialize>(
     Ok(())
 }
 
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+
 /// Read a length-prefixed bincode frame and deserialize it into `T`.
 pub fn read_frame<R: std::io::Read, T: serde::de::DeserializeOwned>(
     reader: &mut R,
@@ -203,6 +205,12 @@ pub fn read_frame<R: std::io::Read, T: serde::de::DeserializeOwned>(
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("frame too large: {len} bytes (max {MAX_FRAME_BYTES})"),
+        ));
+    }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     bincode::deserialize(&buf)
@@ -421,6 +429,89 @@ mod tests {
             missing_recommended: vec![],
         };
         assert_eq!(round_trip_response(resp.clone()), resp);
+    }
+
+    #[test]
+    fn read_frame_truncated_length_returns_err() {
+        // Only 3 bytes — not enough for the 4-byte length prefix.
+        let truncated = [0u8; 3];
+        let mut cursor = Cursor::new(truncated);
+        let result = read_frame::<_, DaemonRequest>(&mut cursor);
+        assert!(result.is_err(), "expected Err for truncated length prefix");
+    }
+
+    #[test]
+    fn read_frame_oversized_rejects() {
+        // Write a length prefix of 128 MiB — well above the 64 MiB limit.
+        let oversized_len: u32 = (128 * 1024 * 1024) as u32;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&oversized_len.to_le_bytes());
+        // No payload bytes needed — the guard must reject before allocating.
+        let mut cursor = Cursor::new(buf);
+        let result = read_frame::<_, DaemonRequest>(&mut cursor);
+        assert!(result.is_err(), "expected Err for oversized frame");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_frame_zero_length_payload() {
+        // A 0-byte frame is technically valid for bincode (e.g. unit types),
+        // but bincode will reject it for non-unit types.  The guard must not
+        // reject a 0-length frame before allocating.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        let mut cursor = Cursor::new(buf);
+        // This will fail at the bincode deserialization step, not the size guard.
+        let result = read_frame::<_, DaemonRequest>(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_frame_exact_limit_is_allowed() {
+        // A frame exactly at MAX_FRAME_BYTES should pass the size guard
+        // (it will fail later at bincode deserialization since the bytes are
+        // not valid, but it must not fail at the guard).
+        let len: u32 = MAX_FRAME_BYTES as u32;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&len.to_le_bytes());
+        // Do NOT add payload bytes — read_exact will return UnexpectedEof,
+        // which is distinct from InvalidData.
+        let mut cursor = Cursor::new(buf);
+        let result = read_frame::<_, DaemonRequest>(&mut cursor);
+        assert!(result.is_err());
+        assert_ne!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData,
+            "exact-limit frame must not be rejected by the size guard"
+        );
+    }
+
+    #[test]
+    fn read_frame_one_over_limit_rejects() {
+        let len: u32 = MAX_FRAME_BYTES as u32 + 1;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&len.to_le_bytes());
+        let mut cursor = Cursor::new(buf);
+        let result = read_frame::<_, DaemonRequest>(&mut cursor);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData,
+            "one-over-limit frame must be rejected by the size guard"
+        );
+    }
+
+    #[test]
+    fn read_frame_max_u32_rejects() {
+        // 0xFFFFFFFF would cause a ~4 GB allocation without the guard.
+        let len: u32 = u32::MAX;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&len.to_le_bytes());
+        let mut cursor = Cursor::new(buf);
+        let result = read_frame::<_, DaemonRequest>(&mut cursor);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

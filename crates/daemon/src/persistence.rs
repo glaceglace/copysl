@@ -14,7 +14,6 @@ pub fn db_path() -> PathBuf {
         .join("history.db")
 }
 
-#[allow(dead_code)]
 pub enum PersistenceCommand {
     Upsert(ClipboardEntry),
     Delete(EntryId),
@@ -38,7 +37,12 @@ impl PersistenceHandle {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        Self::open_with_connection(Connection::open(path)?)
+        let conn = Connection::open(&path)?;
+        // Restrict to owner-only so clipboard history (passwords, tokens, etc.)
+        // is not world-readable.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        Self::open_with_connection(conn)
     }
 
     pub fn open_in_memory() -> Result<(PersistenceHandle, thread::JoinHandle<()>)> {
@@ -86,22 +90,31 @@ fn run_persistence_task(conn: Connection, rx: mpsc::Receiver<PersistenceCommand>
     for cmd in rx {
         match cmd {
             PersistenceCommand::Upsert(entry) => {
-                let _ = upsert_entry(&conn, &entry);
+                if let Err(e) = upsert_entry(&conn, &entry) {
+                    log::error!("Persistence upsert failed for entry {:?}: {e}", entry.id);
+                }
             }
             PersistenceCommand::Delete(id) => {
-                let _ = conn.execute("DELETE FROM entries WHERE id = ?1", params![id.0]);
+                if let Err(e) = conn.execute("DELETE FROM entries WHERE id = ?1", params![id.0]) {
+                    log::error!("Persistence delete failed for entry {}: {e}", id.0);
+                }
             }
             PersistenceCommand::UpdatePin(id, pinned) => {
-                let _ = conn.execute(
+                if let Err(e) = conn.execute(
                     "UPDATE entries SET pinned = ?1 WHERE id = ?2",
                     params![pinned as i64, id.0],
-                );
+                ) {
+                    log::error!("Persistence update_pin failed for entry {}: {e}", id.0);
+                }
             }
             PersistenceCommand::Clear(include_pinned) => {
-                if include_pinned {
-                    let _ = conn.execute("DELETE FROM entries", []);
+                let result = if include_pinned {
+                    conn.execute("DELETE FROM entries", [])
                 } else {
-                    let _ = conn.execute("DELETE FROM entries WHERE pinned = 0", []);
+                    conn.execute("DELETE FROM entries WHERE pinned = 0", [])
+                };
+                if let Err(e) = result {
+                    log::error!("Persistence clear failed: {e}");
                 }
             }
             PersistenceCommand::LoadAll(reply) => {

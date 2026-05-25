@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use common::{ClipboardEntry, Config, EntryId};
@@ -7,6 +7,9 @@ use crate::persistence::{PersistenceCommand, PersistenceHandle};
 
 pub struct HistoryStore {
     entries: VecDeque<ClipboardEntry>,
+    /// Maps content hash → EntryId so duplicate detection is O(1) instead of
+    /// recomputing SHA-256 for every existing entry on each push.
+    hash_index: HashMap<String, EntryId>,
     id_counter: u64,
     config: Arc<RwLock<Config>>,
     persistence: Option<PersistenceHandle>,
@@ -16,6 +19,7 @@ impl HistoryStore {
     pub fn new(config: Arc<RwLock<Config>>, persistence: Option<PersistenceHandle>) -> Self {
         Self {
             entries: VecDeque::new(),
+            hash_index: HashMap::new(),
             id_counter: 0,
             config,
             persistence,
@@ -26,14 +30,16 @@ impl HistoryStore {
         let hash = entry.content_hash();
         let now = std::time::SystemTime::now();
 
-        // Search for an existing entry with the same content hash.
-        if let Some(pos) = self.entries.iter().position(|e| e.content_hash() == hash) {
-            // Duplicate found: remove from current position, update timestamp, move to front.
-            let mut existing = self.entries.remove(pos).expect("position was valid");
-            existing.captured_at = now;
-            self.entries.push_front(existing.clone());
-            if let Some(p) = &self.persistence {
-                p.send(PersistenceCommand::Upsert(existing));
+        // O(1) duplicate check via hash index — no per-entry rehashing.
+        if let Some(&existing_id) = self.hash_index.get(&hash) {
+            // Duplicate found: move it to the front and update timestamp.
+            if let Some(pos) = self.entries.iter().position(|e| e.id == existing_id) {
+                let mut existing = self.entries.remove(pos).expect("position was valid");
+                existing.captured_at = now;
+                if let Some(p) = &self.persistence {
+                    p.send(PersistenceCommand::Upsert(existing.clone()));
+                }
+                self.entries.push_front(existing);
             }
         } else {
             // New entry: assign id and prepend.
@@ -47,6 +53,7 @@ impl HistoryStore {
                 // Find the last (oldest) unpinned entry and remove it.
                 if let Some(evict_pos) = self.entries.iter().rposition(|e| !e.pinned) {
                     let evicted = self.entries.remove(evict_pos).expect("position was valid");
+                    self.hash_index.remove(&evicted.content_hash());
                     if let Some(p) = &self.persistence {
                         p.send(PersistenceCommand::Delete(evicted.id));
                     }
@@ -54,16 +61,23 @@ impl HistoryStore {
                 // If all are pinned, do not evict — just insert anyway.
             }
 
-            self.entries.push_front(entry.clone());
+            self.hash_index.insert(hash, entry.id);
             if let Some(p) = &self.persistence {
-                p.send(PersistenceCommand::Upsert(entry));
+                p.send(PersistenceCommand::Upsert(entry.clone()));
             }
+            self.entries.push_front(entry);
         }
+    }
+
+    /// Look up a single entry by id without cloning the entire store.
+    pub fn get_by_id(&self, id: EntryId) -> Option<ClipboardEntry> {
+        self.entries.iter().find(|e| e.id == id).cloned()
     }
 
     pub fn delete(&mut self, id: EntryId) {
         if let Some(pos) = self.entries.iter().position(|e| e.id == id) {
-            self.entries.remove(pos);
+            let removed = self.entries.remove(pos).expect("position was valid");
+            self.hash_index.remove(&removed.content_hash());
             if let Some(p) = &self.persistence {
                 p.send(PersistenceCommand::Delete(id));
             }
@@ -91,8 +105,16 @@ impl HistoryStore {
     pub fn clear(&mut self, include_pinned: bool) {
         if include_pinned {
             self.entries.clear();
+            self.hash_index.clear();
         } else {
+            let removed: Vec<_> = self.entries.iter()
+                .filter(|e| !e.pinned)
+                .map(|e| e.content_hash())
+                .collect();
             self.entries.retain(|e| e.pinned);
+            for h in removed {
+                self.hash_index.remove(&h);
+            }
         }
         if let Some(p) = &self.persistence {
             p.send(PersistenceCommand::Clear(include_pinned));
@@ -114,16 +136,16 @@ impl HistoryStore {
             .collect()
     }
 
-    #[allow(dead_code)]
     pub fn load_initial(&mut self, entries: Vec<ClipboardEntry>) {
-        self.entries = VecDeque::from(entries);
-        self.id_counter = self
-            .entries
-            .iter()
+        self.hash_index = entries.iter()
+            .map(|e| (e.content_hash(), e.id))
+            .collect();
+        self.id_counter = entries.iter()
             .map(|e| e.id.0)
             .max()
             .map(|m| m + 1)
             .unwrap_or(0);
+        self.entries = VecDeque::from(entries);
     }
 }
 

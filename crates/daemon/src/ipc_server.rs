@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use libc;
+
 use anyhow::Result;
 use common::{ClipboardEntry, Config, DaemonRequest, DaemonResponse};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -18,10 +20,8 @@ pub fn socket_path() -> PathBuf {
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(runtime_dir).join("copysl.sock")
     } else {
-        let uid = std::env::var("UID")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(1000);
+        // SAFETY: getuid() is always safe to call.
+        let uid = unsafe { libc::getuid() };
         PathBuf::from(format!("/tmp/copysl-{uid}.sock"))
     }
 }
@@ -78,6 +78,10 @@ impl IpcServer {
             std::fs::create_dir_all(parent)?;
         }
         let listener = UnixListener::bind(&path)?;
+        // Restrict to owner-only access so other local users cannot read
+        // clipboard history or trigger paste via the socket.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         Ok(IpcServer { listener, path })
     }
 
@@ -134,6 +138,12 @@ async fn handle_connection(
             result = reader.read_exact(&mut len_buf) => {
                 result?;
                 let len = u32::from_le_bytes(len_buf) as usize;
+                if len > 64 * 1024 * 1024 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("frame too large: {len} bytes"),
+                    ).into());
+                }
                 let mut msg_buf = vec![0u8; len];
                 reader.read_exact(&mut msg_buf).await?;
 
@@ -245,7 +255,7 @@ async fn handle_request(
             log::info!("Paste requested for entry {:?}", id);
             let entry = {
                 let s = store.lock().await;
-                s.get_page(0, usize::MAX).into_iter().find(|e| e.id == id)
+                s.get_by_id(id)
             };
             match entry {
                 None => {

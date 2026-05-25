@@ -33,20 +33,22 @@ async fn async_daemon_main() {
     let tokio_config = Arc::new(RwLock::new(cfg.clone()));
 
     // 2. Optionally open persistence and load history
-    let (persistence, initial_entries) = if cfg.persist_history {
+    let (persistence, persistence_thread, initial_entries) = if cfg.persist_history {
         match persistence::PersistenceHandle::open() {
-            Ok((handle, _thread)) => {
+            Ok((handle, thread)) => {
                 let entries = handle.load_all();
-                (Some(handle), entries)
+                (Some(handle), Some(thread), entries)
             }
             Err(e) => {
                 log::error!("Failed to open persistence: {e}");
-                (None, vec![])
+                (None, None, vec![])
             }
         }
     } else {
-        (None, vec![])
+        (None, None, vec![])
     };
+    // Keep a clone so we can send Shutdown before joining the thread at exit.
+    let shutdown_persistence = persistence.clone();
 
     // 3. Initialize HistoryStore
     let mut store = history_store::HistoryStore::new(std_config, persistence);
@@ -187,6 +189,14 @@ async fn async_daemon_main() {
 
     // 14. Graceful shutdown
     server_task.abort();
+    // Signal the persistence thread to flush remaining commands and exit,
+    // then wait for it so no buffered writes are lost on shutdown.
+    if let Some(ref p) = shutdown_persistence {
+        p.send(persistence::PersistenceCommand::Shutdown);
+    }
+    if let Some(thread) = persistence_thread {
+        thread.join().ok();
+    }
     log::info!("Copysl daemon stopped");
 }
 

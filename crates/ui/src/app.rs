@@ -215,7 +215,9 @@ impl eframe::App for CopyslApp {
         }
 
         self.check_focus(ctx);
-        ctx.request_repaint();
+        // Poll for push notifications at 20 fps rather than pinning the CPU at
+        // the display refresh rate (~60 fps) when the window is idle.
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

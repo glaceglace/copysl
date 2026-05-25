@@ -40,7 +40,10 @@ impl FocusTracker for X11FocusTracker {
         std::thread::spawn(move || {
             if let Ok((conn, screen_num)) = xcb::Connection::connect(None) {
                 let setup = conn.get_setup();
-                let screen = setup.roots().nth(screen_num as usize).unwrap();
+                let Some(screen) = setup.roots().nth(screen_num as usize) else {
+                    log::error!("X11 focus tracker: screen index {} out of range", screen_num);
+                    return;
+                };
                 let root = screen.root();
 
                 let active_window_atom = {

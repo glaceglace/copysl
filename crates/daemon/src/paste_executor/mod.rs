@@ -160,6 +160,120 @@ fn spawn_clipboard_server(cmd: &mut std::process::Command, data: &[u8]) -> bool 
     true
 }
 
+/// Set rich-text clipboard via a subprocess of this binary.
+///
+/// `wl-clipboard-rs` `prepare_copy_multi` cannot always connect to the
+/// compositor's data-control protocol from within a long-running daemon
+/// process (GNOME / Mutter restricts it), but a freshly-spawned subprocess
+/// — just like `wl-copy` — can.  We spawn `<current_exe> --serve-clipboard`,
+/// pipe the content through stdin, and the subprocess calls `serve()`.
+///
+/// Wire format written to the subprocess stdin:
+///   [u64 LE: html_len][html bytes][u64 LE: plain_len][plain bytes]
+///
+/// The subprocess exits when another app takes clipboard ownership.  We reap
+/// it in a background thread to avoid zombies.
+#[cfg(not(test))]
+fn try_wl_rich_copy(html: &str, plain: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => { log::warn!("try_wl_rich_copy: current_exe failed: {e}"); return false; }
+    };
+
+    let mut child = match Command::new(&exe)
+        .arg("--serve-clipboard")
+        // Clear WAYLAND_SOCKET so the subprocess always connects via
+        // WAYLAND_DISPLAY; the inherited fd may already be consumed.
+        .env_remove("WAYLAND_SOCKET")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => { log::warn!("try_wl_rich_copy: spawn failed: {e}"); return false; }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let html_b = html.as_bytes();
+        let plain_b = plain.as_bytes();
+        let ok = stdin.write_all(&(html_b.len() as u64).to_le_bytes()).is_ok()
+            && stdin.write_all(html_b).is_ok()
+            && stdin.write_all(&(plain_b.len() as u64).to_le_bytes()).is_ok()
+            && stdin.write_all(plain_b).is_ok();
+        if !ok {
+            let _ = child.kill();
+            log::warn!("try_wl_rich_copy: stdin write failed");
+            return false;
+        }
+    }
+
+    // Reap the subprocess when it exits (prevents zombie accumulation).
+    std::thread::spawn(move || { let _ = child.wait(); });
+    true
+}
+
+/// Entry point for the `--serve-clipboard` subprocess mode.
+///
+/// Reads html+plain from stdin (length-prefixed), then uses `wl-clipboard-rs`
+/// to serve both `text/html` and all plain-text MIME aliases from a single
+/// clipboard owner.  Exits when another app takes clipboard ownership.
+#[cfg(not(test))]
+pub fn clipboard_server_main() {
+    use std::io::Read;
+    use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
+
+    env_logger::init();
+
+    let mut stdin = std::io::stdin();
+
+    let read_block = |stdin: &mut dyn Read| -> Option<Vec<u8>> {
+        let mut len_buf = [0u8; 8];
+        stdin.read_exact(&mut len_buf).ok()?;
+        let len = u64::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; len];
+        stdin.read_exact(&mut buf).ok()?;
+        Some(buf)
+    };
+
+    let html = match read_block(&mut stdin) {
+        Some(b) => b,
+        None => { log::warn!("clipboard_server_main: failed to read html"); return; }
+    };
+    let plain = match read_block(&mut stdin) {
+        Some(b) => b,
+        None => { log::warn!("clipboard_server_main: failed to read plain"); return; }
+    };
+
+    let sources = vec![
+        MimeSource { source: Source::Bytes(plain.clone().into()), mime_type: MimeType::Specific("text/plain;charset=utf-8".into()) },
+        MimeSource { source: Source::Bytes(plain.clone().into()), mime_type: MimeType::Specific("text/plain".into()) },
+        MimeSource { source: Source::Bytes(plain.clone().into()), mime_type: MimeType::Specific("UTF8_STRING".into()) },
+        MimeSource { source: Source::Bytes(plain.clone().into()), mime_type: MimeType::Specific("STRING".into()) },
+        MimeSource { source: Source::Bytes(plain.into()),         mime_type: MimeType::Specific("TEXT".into()) },
+        MimeSource { source: Source::Bytes(html.into()),          mime_type: MimeType::Specific("text/html".into()) },
+    ];
+
+    let mut opts = Options::new();
+    opts.foreground(true);
+    opts.omit_additional_text_mime_types(true);
+
+    let prepared = match opts.prepare_copy_multi(sources) {
+        Ok(p) => p,
+        Err(e) => { log::warn!("clipboard_server_main: prepare_copy_multi failed: {e}"); return; }
+    };
+
+    if let Err(e) = prepared.serve() {
+        log::warn!("clipboard_server_main: serve failed: {e}");
+    }
+}
+
+#[cfg(test)]
+pub fn clipboard_server_main() {} // no-op in tests
+
 /// Try to set clipboard text via `wl-copy` (wl-clipboard package).
 #[cfg(not(test))]
 fn try_wl_copy(text: &str) -> bool {
@@ -173,14 +287,7 @@ fn try_xclip(text: &str) -> bool {
     spawn_clipboard_server(cmd.args(["-selection", "clipboard"]), text.as_bytes())
 }
 
-/// Try to set `text/html` clipboard content via `wl-copy`.
-#[cfg(not(test))]
-fn try_wl_copy_html(html: &str) -> bool {
-    let mut cmd = std::process::Command::new("wl-copy");
-    spawn_clipboard_server(cmd.args(["--type", "text/html"]), html.as_bytes())
-}
-
-/// Try to set `text/html` clipboard content via `xclip`.
+/// Try to set `text/html` clipboard content via `xclip` (X11 fallback).
 #[cfg(not(test))]
 fn try_xclip_html(html: &str) -> bool {
     let mut cmd = std::process::Command::new("xclip");
@@ -227,8 +334,12 @@ impl PasteExecutor {
             let used_persistent = match &entry.payload {
                 ContentPayload::PlainText(t) => try_wl_copy(t) || try_xclip(t),
                 ContentPayload::RichText { html, plain_preview } => {
-                    try_wl_copy_html(html) || try_xclip_html(html)
-                        || try_wl_copy(plain_preview) || try_xclip(plain_preview)
+                    // Wayland: single owner serves text/html → HTML and
+                    // text/plain → stripped text, so plain-text targets don't
+                    // receive raw HTML code.
+                    // X11 fallback: xclip for HTML, then plain text.
+                    try_wl_rich_copy(html, plain_preview)
+                        || try_xclip_html(html) || try_xclip(plain_preview)
                 }
                 ContentPayload::Image { .. } => false,
             };

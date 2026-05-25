@@ -1,5 +1,7 @@
 pub fn parse_mode(args: &[String]) -> RunMode {
-    if args.iter().any(|a| a == "--daemon") {
+    if args.iter().any(|a| a == "--serve-clipboard") {
+        RunMode::ServeClipboard
+    } else if args.iter().any(|a| a == "--daemon") {
         RunMode::Daemon
     } else if args.iter().any(|a| a == "--ui") {
         RunMode::Ui
@@ -26,6 +28,8 @@ pub enum RunMode {
     Ui,
     /// no args: start daemon + show UI window on startup
     DaemonWithUi,
+    /// --serve-clipboard: internal clipboard server subprocess (not for direct use)
+    ServeClipboard,
 }
 
 fn daemon_running(socket_path: &std::path::Path) -> bool {
@@ -90,6 +94,11 @@ fn main() {
         }
     }
     match parse_mode(&args) {
+        RunMode::ServeClipboard => {
+            // Subprocess mode: read html+plain from stdin and serve as clipboard.
+            // Spawned by the daemon's try_wl_rich_copy(); never called by users.
+            daemon::paste_executor::clipboard_server_main();
+        }
         RunMode::Daemon => {
             // Detach from the terminal unless --debug keeps it in the foreground.
             #[cfg(unix)]
@@ -160,6 +169,14 @@ mod tests {
     #[test]
     fn debug_flag_absent_without_arg() {
         assert!(!has_debug_flag(&["copysl".to_string()]));
+    }
+
+    #[test]
+    fn serve_clipboard_flag_detected() {
+        assert_eq!(
+            parse_mode(&["copysl".to_string(), "--serve-clipboard".to_string()]),
+            RunMode::ServeClipboard
+        );
     }
 
     #[test]

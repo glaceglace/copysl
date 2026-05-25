@@ -135,6 +135,8 @@ fn try_wl_copy(text: &str) -> bool {
     use std::io::Write;
     let mut child = match std::process::Command::new("wl-copy")
         .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
     {
         Ok(c) => c,
@@ -156,6 +158,8 @@ fn try_xclip(text: &str) -> bool {
     let mut child = match std::process::Command::new("xclip")
         .args(["-selection", "clipboard"])
         .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
     {
         Ok(c) => c,
@@ -176,6 +180,8 @@ fn try_wl_copy_html(html: &str) -> bool {
     let mut child = match std::process::Command::new("wl-copy")
         .args(["--type", "text/html"])
         .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
     {
         Ok(c) => c,
@@ -196,6 +202,8 @@ fn try_xclip_html(html: &str) -> bool {
     let mut child = match std::process::Command::new("xclip")
         .args(["-selection", "clipboard", "-t", "text/html"])
         .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
     {
         Ok(c) => c,

@@ -64,6 +64,15 @@ impl ClipboardMonitor {
 #[cfg(not(test))]
 struct RealClipboardReader {
     clipboard: arboard::Clipboard,
+    /// The plain-text content we last ran `wl-paste` against.  We only spawn
+    /// the subprocess again when this changes, which prevents Wayland from
+    /// asking the focused application to re-serve its clipboard data on every
+    /// poll cycle (that re-serve request resets the cursor-blink timer).
+    last_checked_text: String,
+    /// True when we found HTML for `last_checked_text`.  Used to suppress the
+    /// subsequent `read_text()` call so we don't emit a duplicate PlainText
+    /// entry for the same copy event that already produced a RichText entry.
+    html_found_for_last_text: bool,
 }
 
 #[cfg(not(test))]
@@ -71,6 +80,8 @@ impl RealClipboardReader {
     fn new() -> Self {
         RealClipboardReader {
             clipboard: arboard::Clipboard::new().expect("Failed to open clipboard"),
+            last_checked_text: String::new(),
+            html_found_for_last_text: false,
         }
     }
 }
@@ -92,20 +103,38 @@ impl ClipboardReader for RealClipboardReader {
     }
 
     fn read_html(&mut self) -> Option<(String, String)> {
-        // Skip the subprocess call right after a paste so the desktop compositor
-        // does not show a "clipboard read by wl-paste" notification for content
-        // we just wrote via wl-copy.
+        // Skip right after a paste to avoid triggering a desktop notification
+        // for clipboard content we just wrote via wl-copy.
         if crate::paste_executor::paste_recently() {
             return None;
         }
+        // Only spawn wl-paste when the plain-text content has actually changed.
+        // On every other poll cycle the compositor would ask the focused app to
+        // re-serve its clipboard data, which resets that app's cursor-blink timer.
+        let current_text = self.clipboard.get_text().ok().unwrap_or_default();
+        if current_text.is_empty() || current_text == self.last_checked_text {
+            return None;
+        }
+        self.last_checked_text = current_text;
+        self.html_found_for_last_text = false;
         // Try Wayland (wl-paste) then X11 (xclip).
         let html = read_html_wl_paste().or_else(read_html_xclip)?;
+        self.html_found_for_last_text = true;
         let plain = strip_html_tags(&html);
         Some((html, plain))
     }
 
     fn read_text(&mut self) -> Option<String> {
-        self.clipboard.get_text().ok()
+        let t = self.clipboard.get_text().ok()?;
+        if t.is_empty() {
+            return None;
+        }
+        // Suppress plain-text when we already captured this content as HTML so
+        // the same copy event doesn't produce both a RichText and a PlainText entry.
+        if self.html_found_for_last_text && t == self.last_checked_text {
+            return None;
+        }
+        Some(t)
     }
 }
 
@@ -114,6 +143,7 @@ impl ClipboardReader for RealClipboardReader {
 fn read_html_wl_paste() -> Option<String> {
     let out = std::process::Command::new("wl-paste")
         .args(["--type", "text/html", "--no-newline"])
+        .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
     if !out.status.success() { return None; }
@@ -128,6 +158,7 @@ fn read_html_wl_paste() -> Option<String> {
 fn read_html_xclip() -> Option<String> {
     let out = std::process::Command::new("xclip")
         .args(["-selection", "clipboard", "-t", "text/html", "-o"])
+        .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
     if !out.status.success() { return None; }
@@ -776,6 +807,240 @@ mod tests {
         assert_eq!(block_sep("<P>"), '\n');
         assert_eq!(block_sep("<BR>"), '\n');
         assert_eq!(block_sep("<DIV>"), '\n');
+    }
+
+    // ── ThrottledHtmlReader (mirrors RealClipboardReader throttling logic) ────
+    //
+    // `RealClipboardReader` is `#[cfg(not(test))]`, so we can't instantiate it
+    // in tests.  This struct re-implements its `last_checked_text` /
+    // `html_found_for_last_text` fields and the identical read_html / read_text
+    // logic so we can exercise the throttling behaviour directly.
+
+    struct ThrottledHtmlReader {
+        current_text: String,
+        html_map: std::collections::HashMap<String, (String, String)>,
+        last_checked_text: String,
+        html_found_for_last_text: bool,
+        /// Counts how many times the wl-paste path would have been entered.
+        html_fetch_count: usize,
+    }
+
+    impl ThrottledHtmlReader {
+        fn new(text: &str) -> Self {
+            ThrottledHtmlReader {
+                current_text: text.to_string(),
+                html_map: std::collections::HashMap::new(),
+                last_checked_text: String::new(),
+                html_found_for_last_text: false,
+                html_fetch_count: 0,
+            }
+        }
+
+        fn with_html(mut self, text: &str, html: &str, plain: &str) -> Self {
+            self.html_map.insert(text.to_string(), (html.to_string(), plain.to_string()));
+            self
+        }
+
+        fn set_text(&mut self, text: &str) {
+            self.current_text = text.to_string();
+        }
+    }
+
+    impl ClipboardReader for ThrottledHtmlReader {
+        fn read_image(&mut self) -> Option<(Vec<u8>, ImageMime)> { None }
+
+        fn read_html(&mut self) -> Option<(String, String)> {
+            let t = self.current_text.clone();
+            if t.is_empty() || t == self.last_checked_text {
+                return None;
+            }
+            self.html_fetch_count += 1;
+            self.last_checked_text = t.clone();
+            self.html_found_for_last_text = false;
+            if let Some((h, p)) = self.html_map.get(&t) {
+                self.html_found_for_last_text = true;
+                return Some((h.clone(), p.clone()));
+            }
+            None
+        }
+
+        fn read_text(&mut self) -> Option<String> {
+            let t = &self.current_text;
+            if t.is_empty() { return None; }
+            if self.html_found_for_last_text && *t == self.last_checked_text {
+                return None;
+            }
+            Some(t.clone())
+        }
+    }
+
+    // ── Direct unit tests for the throttling / suppression logic ─────────────
+
+    #[test]
+    fn throttled_reader_skips_html_fetch_when_text_unchanged() {
+        let mut r = ThrottledHtmlReader::new("hello");
+        r.read_html(); // "hello" ≠ "" → counted as one fetch
+        assert_eq!(r.html_fetch_count, 1);
+        r.read_html(); // text still "hello" → same as last_checked → skip
+        r.read_html();
+        assert_eq!(r.html_fetch_count, 1,
+            "fetch must not fire again for unchanged text");
+    }
+
+    #[test]
+    fn throttled_reader_refetches_on_text_change() {
+        let mut r = ThrottledHtmlReader::new("hello");
+        r.read_html();
+        assert_eq!(r.html_fetch_count, 1);
+        r.set_text("world");
+        r.read_html();
+        assert_eq!(r.html_fetch_count, 2,
+            "changing text must trigger a new fetch");
+    }
+
+    #[test]
+    fn throttled_reader_empty_text_never_fetches() {
+        let mut r = ThrottledHtmlReader::new("");
+        r.read_html();
+        r.read_html();
+        assert_eq!(r.html_fetch_count, 0, "empty text must never trigger a fetch");
+    }
+
+    #[test]
+    fn throttled_reader_read_text_suppressed_after_html_found() {
+        let mut r = ThrottledHtmlReader::new("hello")
+            .with_html("hello", "<b>hello</b>", "hello");
+        assert!(r.read_html().is_some(), "html should be found for 'hello'");
+        assert!(r.read_text().is_none(),
+            "read_text must return None when html was already captured for this text");
+    }
+
+    #[test]
+    fn throttled_reader_read_text_not_suppressed_when_no_html() {
+        let mut r = ThrottledHtmlReader::new("hello"); // no html configured
+        assert!(r.read_html().is_none());
+        assert_eq!(r.read_text(), Some("hello".to_string()),
+            "read_text must return the text when no html was found");
+    }
+
+    #[test]
+    fn throttled_reader_read_text_not_suppressed_after_text_change() {
+        let mut r = ThrottledHtmlReader::new("hello")
+            .with_html("hello", "<b>hello</b>", "hello");
+        r.read_html(); // html_found_for_last_text = true, last_checked = "hello"
+        r.set_text("world");
+        assert_eq!(r.read_text(), Some("world".to_string()),
+            "read_text must not be suppressed when text has changed");
+    }
+
+    #[test]
+    fn throttled_reader_html_found_flag_cleared_on_next_text() {
+        let mut r = ThrottledHtmlReader::new("hello")
+            .with_html("hello", "<b>hello</b>", "hello");
+        r.read_html(); // html_found = true
+        assert!(r.html_found_for_last_text);
+        r.set_text("world"); // "world" has no html entry
+        r.read_html();       // fetch for "world" → not in map → html_found = false
+        assert!(!r.html_found_for_last_text,
+            "html_found must be cleared when the new text has no html");
+    }
+
+    #[test]
+    fn throttled_reader_repeated_suppression_while_text_stable() {
+        // Simulate the monitor polling many times without a new copy event.
+        // read_html must not increment fetch_count; read_text must stay None.
+        let mut r = ThrottledHtmlReader::new("stable")
+            .with_html("stable", "<p>stable</p>", "stable");
+        r.read_html(); // first time → fetch, html found
+        assert_eq!(r.html_fetch_count, 1);
+        for _ in 0..10 {
+            assert!(r.read_html().is_none(), "repeated read_html must return None");
+            assert!(r.read_text().is_none(), "read_text must stay suppressed");
+        }
+        assert_eq!(r.html_fetch_count, 1, "fetch count must not increase without text change");
+    }
+
+    // ── Monitor-level: no PlainText duplicate after RichText ─────────────────
+
+    /// Serves HTML once for a fixed text, suppresses `read_text` for N cycles,
+    /// then poisons the channel so the monitor thread exits cleanly.
+    struct HtmlOnceSuppressReader {
+        last_checked_text: String,
+        html_found_for_last_text: bool,
+        suppress_remaining: u8,
+        stop_counter: u64,
+    }
+
+    impl HtmlOnceSuppressReader {
+        fn new(suppress: u8) -> Self {
+            HtmlOnceSuppressReader {
+                last_checked_text: String::new(),
+                html_found_for_last_text: false,
+                suppress_remaining: suppress,
+                stop_counter: 0,
+            }
+        }
+        fn current_text() -> &'static str { "Hello world" }
+    }
+
+    impl ClipboardReader for HtmlOnceSuppressReader {
+        fn read_image(&mut self) -> Option<(Vec<u8>, ImageMime)> { None }
+
+        fn read_html(&mut self) -> Option<(String, String)> {
+            let t = Self::current_text();
+            if t == self.last_checked_text { return None; }
+            self.last_checked_text = t.to_string();
+            self.html_found_for_last_text = true;
+            Some(("<b>Hello world</b>".to_string(), "Hello world".to_string()))
+        }
+
+        fn read_text(&mut self) -> Option<String> {
+            let t = Self::current_text();
+            if self.html_found_for_last_text && t == self.last_checked_text {
+                if self.suppress_remaining > 0 {
+                    self.suppress_remaining -= 1;
+                    return None;
+                }
+                // Budget exhausted → poison to terminate the thread
+                self.stop_counter += 1;
+                return Some(format!("__stop__{}", self.stop_counter));
+            }
+            Some(t.to_string())
+        }
+    }
+
+    #[test]
+    fn monitor_no_plain_text_after_rich_text_for_same_content() {
+        // When read_html returns HTML for text A, the subsequent read_text for
+        // the same A must be suppressed so the monitor emits exactly one entry
+        // (RichText) with no duplicate PlainText.  Without the suppression the
+        // two variants produce different content hashes and BOTH would be sent.
+        let (tx, rx) = mpsc::channel();
+        let reader = HtmlOnceSuppressReader::new(3);
+        let handle = ClipboardMonitor::spawn_with_reader(tx, reader);
+
+        let mut entries = Vec::new();
+        loop {
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(entry) => {
+                    let is_stop = matches!(&entry.payload,
+                        ContentPayload::PlainText(t) if t.starts_with("__stop__"));
+                    if is_stop { break; }
+                    entries.push(entry);
+                }
+                Err(_) => break,
+            }
+        }
+
+        drop(rx);
+        handle.join().ok();
+
+        assert_eq!(entries.len(), 1,
+            "expected exactly one entry (RichText); got {entries:?}");
+        assert!(
+            matches!(&entries[0].payload, ContentPayload::RichText { .. }),
+            "expected RichText, got {:?}", entries[0].payload
+        );
     }
 
 }

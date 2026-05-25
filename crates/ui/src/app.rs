@@ -32,6 +32,11 @@ pub struct CopyslApp {
     /// transition so we clear `dragging` only when focus actually returns,
     /// not on every normally-focused frame.
     was_focused: bool,
+    /// Set after the first `ViewportCommand::Focus` is sent so we do not
+    /// re-send it every frame until the OS delivers the initial focus event.
+    /// Repeated Focus commands cause the compositor to steal focus from other
+    /// windows on every repaint cycle.
+    focus_requested: bool,
 }
 
 struct ToolWarnings {
@@ -62,6 +67,7 @@ impl CopyslApp {
                     had_focus: false,
                     dragging: false,
                     was_focused: false,
+                    focus_requested: false,
                 };
                 setup_fonts(&cc.egui_ctx);
                 apply_theme(&cc.egui_ctx, &app.config.theme);
@@ -112,6 +118,7 @@ impl CopyslApp {
                     had_focus: false,
                     dragging: false,
                     was_focused: false,
+                    focus_requested: false,
                 }
             }
         }
@@ -243,11 +250,17 @@ impl CopyslApp {
                 self.dragging = false;
             }
         } else if self.had_focus && !self.dragging {
-            // Focus lost. Check if a left primary-button press occurred this same
-            // frame — that is the WM reacting to a drag-start on the title bar.
-            // On some X11 WMs the FocusOut arrives in the same frame as the click,
-            // before render() has had a chance to set dragging=true.
-            let left_click = ctx.input(|i| {
+            // Focus lost.  Before closing, check whether the pointer is still
+            // inside the window.  On Wayland some compositors briefly report
+            // focused=false during the mouse-UP event that fires a button click
+            // (including the settings ⚙ button).  In that case hover_pos() is
+            // still Some — the pointer hasn't left — so we must not close.
+            //
+            // Separately, a mouse-DOWN on the title drag-area is the WM asking
+            // us to start a window move; detect that and send StartDrag instead
+            // of closing.
+            let pointer_in_window = ctx.input(|i| i.pointer.hover_pos().is_some());
+            let left_press = ctx.input(|i| {
                 i.events.iter().any(|e| matches!(
                     e,
                     egui::Event::PointerButton {
@@ -257,14 +270,19 @@ impl CopyslApp {
                     }
                 ))
             });
-            if left_click {
+            if left_press {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 self.dragging = true;
+            } else if pointer_in_window {
+                // Pointer is still inside the window (e.g. mouse-up after
+                // clicking a button) — compositor sent a transient focus-loss
+                // event; do not close.
             } else {
                 self.close(ctx);
             }
-        } else if !self.had_focus {
+        } else if !self.had_focus && !self.focus_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.focus_requested = true;
         }
         self.was_focused = focused;
     }
@@ -799,6 +817,7 @@ mod tests {
             had_focus: false,
             dragging: false,
             was_focused: false,
+            focus_requested: false,
         }
     }
 
@@ -894,6 +913,12 @@ mod tests {
     fn had_focus_starts_false() {
         let app = make_app_with_entries(vec![]);
         assert!(!app.had_focus);
+    }
+
+    #[test]
+    fn focus_requested_starts_false() {
+        let app = make_app_with_entries(vec![]);
+        assert!(!app.focus_requested);
     }
 
     // ── light_visuals ─────────────────────────────────────────────────────────
@@ -1279,18 +1304,133 @@ mod tests {
     }
 
     #[test]
-    fn check_focus_right_click_does_not_suppress_close() {
+    fn check_focus_requests_focus_only_once() {
+        // The Focus command must be sent exactly once at startup, not on every
+        // unfocused frame (repeated Focus steals focus from other windows every
+        // repaint cycle and interferes with cursor blink in other apps).
+        let mut app = make_app_with_entries(vec![]);
+        let cmds1 = run_focus_frame(&mut app, false, vec![]);
+        assert!(
+            cmds1.iter().any(|c| matches!(c, egui::ViewportCommand::Focus)),
+            "expected Focus on first unfocused frame"
+        );
+        assert!(app.focus_requested, "focus_requested must be set after first frame");
+        // Second unfocused frame — Focus must NOT be re-sent.
+        let cmds2 = run_focus_frame(&mut app, false, vec![]);
+        assert!(
+            !cmds2.iter().any(|c| matches!(c, egui::ViewportCommand::Focus)),
+            "must not re-send Focus after first request; got {cmds2:?}"
+        );
+    }
+
+    #[test]
+    fn check_focus_right_click_inside_window_does_not_close() {
+        // A right-click inside the window (pointer pos is Some) while focus is
+        // briefly lost (Wayland compositor behaviour on mouse-up) must not close
+        // the window and must not trigger a drag.
         let mut app = make_app_with_entries(vec![]);
         app.had_focus = true;
         let cmds = run_focus_frame(&mut app, false, vec![right_click_event()]);
         assert!(
-            cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)),
-            "right-click must not prevent close"
+            !cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "right-click inside window must not close it"
         );
         assert!(
             !cmds.iter().any(|c| matches!(c, egui::ViewportCommand::StartDrag)),
             "right-click must not trigger StartDrag"
         );
+    }
+
+    /// Like `run_focus_frame` but also injects a PointerMoved event so that
+    /// egui reports `hover_pos() = Some(pos)` — i.e. the pointer is inside the
+    /// window.  This simulates a Wayland compositor that briefly sends
+    /// focused=false on a mouse-up event while the pointer is still inside.
+    fn run_focus_frame_with_pointer(
+        app: &mut CopyslApp,
+        focused: bool,
+        pointer_pos: egui::Pos2,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::ViewportCommand> {
+        let ctx = egui::Context::default();
+        let mut all_events = vec![egui::Event::PointerMoved(pointer_pos)];
+        all_events.extend(events);
+        ctx.begin_pass(egui::RawInput {
+            focused,
+            events: all_events,
+            ..Default::default()
+        });
+        app.check_focus(&ctx);
+        let output = ctx.end_pass();
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|vo| vo.commands.clone())
+            .unwrap_or_default()
+    }
+
+    // ── Pointer-in-window suppresses spurious focus-loss close ────────────────
+
+    #[test]
+    fn check_focus_no_close_when_pointer_in_window_on_focus_loss() {
+        // Simulates clicking a button (e.g. settings ⚙): Wayland briefly sends
+        // focused=false on mouse-up while hover_pos() is still Some.
+        let mut app = make_app_with_entries(vec![]);
+        app.had_focus = true;
+        let pos = egui::Pos2::new(50.0, 15.0); // inside any reasonable window
+        let cmds = run_focus_frame_with_pointer(&mut app, false, pos, vec![]);
+        assert!(
+            !cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "must not close when pointer is still in window (Wayland mouse-up focus-loss)"
+        );
+    }
+
+    #[test]
+    fn check_focus_no_start_drag_when_only_mouse_up_and_pointer_in_window() {
+        // Mouse-up (pressed=false) + pointer in window + focus lost → no drag, no close.
+        let mut app = make_app_with_entries(vec![]);
+        app.had_focus = true;
+        let pos = egui::Pos2::new(50.0, 15.0);
+        let mouse_up = egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        let cmds = run_focus_frame_with_pointer(&mut app, false, pos, vec![mouse_up]);
+        assert!(
+            !cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "mouse-up with pointer in window must not close"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, egui::ViewportCommand::StartDrag)),
+            "mouse-up must not trigger StartDrag"
+        );
+    }
+
+    #[test]
+    fn check_focus_closes_when_pointer_outside_window_on_focus_loss() {
+        // No pointer position injected → hover_pos() is None → pointer left window → close.
+        let mut app = make_app_with_entries(vec![]);
+        app.had_focus = true;
+        let cmds = run_focus_frame(&mut app, false, vec![]);
+        assert!(
+            cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "must close when pointer is outside the window"
+        );
+    }
+
+    #[test]
+    fn check_focus_start_drag_on_left_press_even_with_pointer_in_window() {
+        // Mouse-DOWN (pressed=true) + pointer in window + focus lost → StartDrag (drag gesture).
+        let mut app = make_app_with_entries(vec![]);
+        app.had_focus = true;
+        let pos = egui::Pos2::new(200.0, 15.0);
+        let cmds = run_focus_frame_with_pointer(&mut app, false, pos, vec![left_click_event()]);
+        assert!(
+            cmds.iter().any(|c| matches!(c, egui::ViewportCommand::StartDrag)),
+            "left press must still trigger StartDrag for drag-area clicks"
+        );
+        assert!(app.dragging, "dragging flag must be set");
     }
 
 }

@@ -39,3 +39,4 @@ path = "src/main.rs"
 [dependencies]
 daemon = { path = "crates/daemon" }
 ui = { path = "crates/ui" }
+libc = { workspace = true }

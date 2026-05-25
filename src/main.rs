@@ -41,6 +41,46 @@ fn wait_for_daemon(socket_path: &std::path::Path) {
     }
 }
 
+/// Detach from the terminal using the classic Unix double-fork technique.
+///
+/// After this call the process is a background daemon: the shell gets its
+/// prompt back, the process is immune to SIGHUP when the terminal closes,
+/// and stdin/stdout/stderr are redirected to /dev/null.
+///
+/// Not called when `--debug` is active so that log output stays visible.
+#[cfg(unix)]
+fn daemonize() {
+    unsafe {
+        // First fork — let the parent exit so the shell regains its prompt.
+        let pid = libc::fork();
+        assert!(pid >= 0, "daemonize: first fork failed");
+        if pid > 0 {
+            libc::_exit(0);
+        }
+        // Become a new session leader, detaching from the controlling terminal.
+        libc::setsid();
+        // Second fork — prevents the daemon from ever reacquiring a terminal.
+        let pid = libc::fork();
+        assert!(pid >= 0, "daemonize: second fork failed");
+        if pid > 0 {
+            libc::_exit(0);
+        }
+        // Redirect stdin / stdout / stderr to /dev/null.
+        let null = libc::open(
+            b"/dev/null\0".as_ptr() as *const libc::c_char,
+            libc::O_RDWR,
+        );
+        if null >= 0 {
+            libc::dup2(null, libc::STDIN_FILENO);
+            libc::dup2(null, libc::STDOUT_FILENO);
+            libc::dup2(null, libc::STDERR_FILENO);
+            if null > libc::STDERR_FILENO {
+                libc::close(null);
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if has_debug_flag(&args) {
@@ -51,6 +91,11 @@ fn main() {
     }
     match parse_mode(&args) {
         RunMode::Daemon => {
+            // Detach from the terminal unless --debug keeps it in the foreground.
+            #[cfg(unix)]
+            if !has_debug_flag(&args) {
+                daemonize();
+            }
             daemon::daemon_main();
         }
         RunMode::Ui => {

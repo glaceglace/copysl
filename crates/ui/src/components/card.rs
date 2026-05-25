@@ -39,21 +39,60 @@ pub fn preview_lines(text: &str, max_lines: usize) -> Vec<String> {
     result
 }
 
-/// Pure function: format relative time. Testable without egui.
-pub fn format_relative_time(age: Duration) -> String {
+/// Pure function: compact relative timestamp. Testable without egui.
+///
+/// Format:
+///   age < 1 min  → `<1m`
+///   1–59 min     → `3m`, `59m`
+///   1h–10h       → `1h`, `1.5h`, `9.9h`  (1-decimal, drop ".0" for whole hours)
+///   ≥ 10h        → `DD/MM`  (UTC date, e.g. `25/12`)
+pub fn format_relative_time(captured_at: std::time::SystemTime) -> String {
+    let age = captured_at.elapsed().unwrap_or(Duration::ZERO);
     let secs = age.as_secs();
     if secs < 60 {
-        "just now".to_string()
+        "<1m".to_string()
     } else if secs < 3600 {
-        format!("{} min ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{} h ago", secs / 3600)
-    } else if secs < 172800 {
-        "yesterday".to_string()
+        format!("{}m", secs / 60)
+    } else if secs < 36_000 {
+        // Round to nearest 0.1 h using integer arithmetic.
+        let tenths = (secs * 10 + 1800) / 3600;
+        if tenths % 10 == 0 {
+            format!("{}h", tenths / 10)
+        } else {
+            format!("{}.{}h", tenths / 10, tenths % 10)
+        }
     } else {
-        let days = secs / 86400;
-        format!("{days} days ago")
+        let (day, month) = day_month_utc(captured_at);
+        format!("{:02}/{:02}", day, month)
     }
+}
+
+fn day_month_utc(t: std::time::SystemTime) -> (u32, u32) {
+    use std::time::UNIX_EPOCH;
+    let secs = t.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs();
+    let mut rem = secs / 86400; // days since epoch
+    let mut year = 1970u32;
+    loop {
+        let yd = if is_leap_year(year) { 366u64 } else { 365u64 };
+        if rem < yd { break; }
+        rem -= yd;
+        year += 1;
+    }
+    let month_days: [u64; 12] = [
+        31, if is_leap_year(year) { 29 } else { 28 },
+        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+    ];
+    let mut month = 1u32;
+    for &md in &month_days {
+        if rem < md { break; }
+        rem -= md;
+        month += 1;
+    }
+    ((rem + 1) as u32, month)
+}
+
+fn is_leap_year(y: u32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 /// Render one clipboard entry card.
@@ -72,7 +111,7 @@ pub fn show_card(
     let mut action = None;
 
     let ch = crate::style::card_height(ui.ctx().screen_rect().height());
-    let content_height = (ch - SPACE_M * 2.0).max(0.0);
+    let content_height = (ch - 6.0 * 2.0).max(0.0);
 
     // Pre-estimate the card rect for hover detection (one frame lag is acceptable).
     let card_top = ui.next_widget_position();
@@ -94,7 +133,7 @@ pub fn show_card(
 
     let frame = egui::Frame::new()
         .fill(fill)
-        .inner_margin(egui::Margin::same(SPACE_M as i8))
+        .inner_margin(egui::Margin::same(6))
         .corner_radius(egui::CornerRadius::same(RADIUS_CARD));
 
     let mut delete_btn_rect: Option<egui::Rect> = None;
@@ -111,7 +150,7 @@ pub fn show_card(
                 ui.set_min_height(content_height);
                 match &entry.payload {
                     ContentPayload::PlainText(text) => {
-                        for line in preview_lines(text, 4) {
+                        for line in preview_lines(text, 5) {
                             emoji.render_line(ui, &line)
                                 .on_hover_text(text.as_str());
                         }
@@ -149,10 +188,9 @@ pub fn show_card(
             ui.vertical(|ui| {
                 ui.set_width(meta_w);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    let age = entry.captured_at.elapsed().unwrap_or(Duration::ZERO);
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(format_relative_time(age))
+                            egui::RichText::new(format_relative_time(entry.captured_at))
                                 .text_style(egui::TextStyle::Small)
                                 .color(visuals.weak_text_color()),
                         )
@@ -413,78 +451,112 @@ mod tests {
         assert_eq!(preview_lines("a\nb", 1), vec!["\u{2026}"]);
     }
 
-    // ── Happy-path coverage ───────────────────────────────────────────────────
+    // Helper: create a SystemTime that is `secs` seconds in the past.
+    fn ago(secs: u64) -> std::time::SystemTime {
+        std::time::SystemTime::now() - Duration::from_secs(secs)
+    }
+
+    // Helper: create a fixed past UTC date via Unix timestamp for date tests.
+    fn at_unix(secs: u64) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    // ── <1m ──────────────────────────────────────────────────────────────────
 
     #[test]
-    fn relative_time_just_now() {
-        assert_eq!(format_relative_time(Duration::from_secs(30)), "just now");
+    fn relative_time_zero_is_lt1m() {
+        assert_eq!(format_relative_time(ago(0)), "<1m");
+    }
+
+    #[test]
+    fn relative_time_59s_is_lt1m() {
+        assert_eq!(format_relative_time(ago(59)), "<1m");
+    }
+
+    // ── minutes ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn relative_time_60s_crosses_to_minutes() {
+        assert_eq!(format_relative_time(ago(60)), "1m");
     }
 
     #[test]
     fn relative_time_minutes() {
-        assert_eq!(format_relative_time(Duration::from_secs(120)), "2 min ago");
+        assert_eq!(format_relative_time(ago(120)), "2m");
     }
 
     #[test]
-    fn relative_time_hours() {
-        assert_eq!(format_relative_time(Duration::from_secs(7200)), "2 h ago");
+    fn relative_time_3599s_is_59m() {
+        assert_eq!(format_relative_time(ago(3599)), "59m");
     }
 
-    #[test]
-    fn relative_time_yesterday() {
-        assert_eq!(format_relative_time(Duration::from_secs(90000)), "yesterday");
-    }
-
-    #[test]
-    fn relative_time_days() {
-        assert_eq!(format_relative_time(Duration::from_secs(3 * 86400)), "3 days ago");
-    }
-
-    // ── Boundary transitions ──────────────────────────────────────────────────
-
-    #[test]
-    fn relative_time_zero_is_just_now() {
-        assert_eq!(format_relative_time(Duration::ZERO), "just now");
-    }
-
-    #[test]
-    fn relative_time_59s_is_just_now() {
-        assert_eq!(format_relative_time(Duration::from_secs(59)), "just now");
-    }
-
-    #[test]
-    fn relative_time_60s_crosses_to_minutes() {
-        assert_eq!(format_relative_time(Duration::from_secs(60)), "1 min ago");
-    }
-
-    #[test]
-    fn relative_time_3599s_is_minutes() {
-        assert_eq!(format_relative_time(Duration::from_secs(3599)), "59 min ago");
-    }
+    // ── hours ────────────────────────────────────────────────────────────────
 
     #[test]
     fn relative_time_3600s_crosses_to_hours() {
-        assert_eq!(format_relative_time(Duration::from_secs(3600)), "1 h ago");
+        assert_eq!(format_relative_time(ago(3600)), "1h");
     }
 
     #[test]
-    fn relative_time_86399s_is_hours() {
-        assert_eq!(format_relative_time(Duration::from_secs(86399)), "23 h ago");
+    fn relative_time_half_hour_decimals() {
+        assert_eq!(format_relative_time(ago(5400)), "1.5h");
     }
 
     #[test]
-    fn relative_time_86400s_crosses_to_yesterday() {
-        assert_eq!(format_relative_time(Duration::from_secs(86400)), "yesterday");
+    fn relative_time_2_point_3h() {
+        // 2.3 h = 8280 s
+        assert_eq!(format_relative_time(ago(8280)), "2.3h");
     }
 
     #[test]
-    fn relative_time_172799s_is_still_yesterday() {
-        assert_eq!(format_relative_time(Duration::from_secs(172799)), "yesterday");
+    fn relative_time_whole_hours_drop_decimal() {
+        assert_eq!(format_relative_time(ago(7200)), "2h");
+        assert_eq!(format_relative_time(ago(18000)), "5h");
     }
 
     #[test]
-    fn relative_time_172800s_crosses_to_days() {
-        assert_eq!(format_relative_time(Duration::from_secs(172800)), "2 days ago");
+    fn relative_time_just_under_10h_shows_hours() {
+        // 9 h 59 min = 35940 s < 36000 — still in hours range
+        let s = format_relative_time(ago(35940));
+        assert!(s.ends_with('h'), "expected hours format, got {s}");
+    }
+
+    // ── date (≥ 10 h) ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn relative_time_date_format_christmas() {
+        // 2024-12-25 00:00:00 UTC = 1 735 084 800
+        let s = format_relative_time(at_unix(1_735_084_800));
+        assert_eq!(s, "25/12");
+    }
+
+    #[test]
+    fn relative_time_date_format_new_year() {
+        // 2025-01-01 00:00:00 UTC = 1 735 689 600
+        let s = format_relative_time(at_unix(1_735_689_600));
+        assert_eq!(s, "01/01");
+    }
+
+    #[test]
+    fn relative_time_date_format_feb28_non_leap() {
+        // 2023-02-28 00:00:00 UTC = 1 677 542 400
+        let s = format_relative_time(at_unix(1_677_542_400));
+        assert_eq!(s, "28/02");
+    }
+
+    #[test]
+    fn relative_time_date_format_feb29_leap() {
+        // 2024-02-29 00:00:00 UTC = 1 709 164 800
+        let s = format_relative_time(at_unix(1_709_164_800));
+        assert_eq!(s, "29/02");
+    }
+
+    #[test]
+    fn relative_time_36000s_crosses_to_date() {
+        // 10 h = 36 000 s — exact boundary enters date format.
+        let s = format_relative_time(ago(36_000));
+        assert!(!s.ends_with('h'), "10 h boundary should show date, got {s}");
+        assert!(s.contains('/'), "expected DD/MM format, got {s}");
     }
 
     // ── route_card_click ──────────────────────────────────────────────────────

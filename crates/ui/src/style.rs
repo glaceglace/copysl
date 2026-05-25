@@ -14,9 +14,9 @@ pub fn card_height(window_height: f32) -> f32 {
 }
 
 /// Width of the metadata (timestamp) column.
-/// 70 px floor comfortably fits "23 h ago" in Small style.
+/// 44 px floor fits the longest compact timestamp ("25/12", "9.9h") in Small style.
 pub fn meta_width(available: f32) -> f32 {
-    (available * 0.20).max(70.0)
+    (available * 0.12).max(44.0)
 }
 
 /// Width of the text-preview column.
@@ -64,24 +64,26 @@ mod tests {
 
     #[test]
     fn meta_width_clamps_to_minimum() {
-        // 50 * 0.20 = 10 < 70  →  minimum kicks in
-        assert_eq!(meta_width(50.0), 70.0);
-        // 100 * 0.20 = 20 < 70  →  minimum kicks in
-        assert_eq!(meta_width(100.0), 70.0);
+        // 50 * 0.12 = 6 < 44  →  minimum kicks in
+        assert_eq!(meta_width(50.0), 44.0);
+        // 360 * 0.12 = 43.2 < 44  →  minimum kicks in
+        assert_eq!(meta_width(360.0), 44.0);
     }
 
     #[test]
     fn meta_width_uses_percentage_above_minimum() {
-        // 500 * 0.20 = 100 > 70  →  percentage wins
-        let w = meta_width(500.0);
-        assert!((w - 100.0).abs() < 0.01, "expected 100.0, got {w}");
+        // 400 * 0.12 = 48.0 > 44  →  percentage wins
+        let w = meta_width(400.0);
+        assert!((w - 48.0).abs() < 0.01, "expected 48.0, got {w}");
     }
 
     #[test]
-    fn meta_width_crossover_at_350() {
-        // 350 * 0.20 = 70.0 exactly — both rules agree at the breakpoint
-        let w = meta_width(350.0);
-        assert!((w - 70.0).abs() < 0.01, "expected 70.0, got {w}");
+    fn meta_width_crossover_near_367() {
+        // Crossover at 44 / 0.12 ≈ 366.7
+        // 370 * 0.12 = 44.4 > 44  →  percentage wins
+        assert!(meta_width(370.0) > 44.0);
+        // 360 * 0.12 = 43.2 < 44  →  minimum
+        assert_eq!(meta_width(360.0), 44.0);
     }
 
     // ── text_width ────────────────────────────────────────────────────────────

@@ -4,16 +4,17 @@ use egui::{Pos2, Vec2, ViewportBuilder};
 
 /// Compute the logical window size from the screen resolution.
 ///
-/// Width  ≈ 28 % of screen width,  clamped to [360, 600].
-/// Height ≈ 65 % of screen height, clamped to [480, 860].
+/// Width  ≈ 22 % of screen width,  clamped to [340, 420].
+/// Height ≈ 50 % of screen height, clamped to [440, 600].
 ///
+/// Targets a compact popup similar to Windows Win+V.
 /// When `screen_size` is `None` the function falls back to 1920 × 1080.
 pub fn compute_window_size(screen_size: Option<(u32, u32)>) -> (f32, f32) {
     let (sw, sh) = screen_size
         .map(|(w, h)| (w as f32, h as f32))
         .unwrap_or((1920.0, 1080.0));
-    let w = (sw * 0.28).clamp(360.0, 600.0);
-    let h = (sh * 0.65).clamp(480.0, 860.0);
+    let w = (sw * 0.22).clamp(340.0, 420.0);
+    let h = (sh * 0.50).clamp(440.0, 600.0);
     (w, h)
 }
 
@@ -136,22 +137,22 @@ mod tests {
     #[test]
     fn window_size_1080p_within_bounds() {
         let (w, h) = compute_window_size(SCREEN_1080P);
-        assert!(w >= 360.0 && w <= 600.0, "width={w}");
-        assert!(h >= 480.0 && h <= 860.0, "height={h}");
+        assert!(w >= 340.0 && w <= 420.0, "width={w}");
+        assert!(h >= 440.0 && h <= 600.0, "height={h}");
     }
 
     #[test]
     fn window_size_1440p_within_bounds() {
         let (w, h) = compute_window_size(SCREEN_1440P);
-        assert!(w >= 360.0 && w <= 600.0, "width={w}");
-        assert!(h >= 480.0 && h <= 860.0, "height={h}");
+        assert!(w >= 340.0 && w <= 420.0, "width={w}");
+        assert!(h >= 440.0 && h <= 600.0, "height={h}");
     }
 
     #[test]
     fn window_size_fallback_within_bounds() {
         let (w, h) = compute_window_size(None);
-        assert!(w >= 360.0 && w <= 600.0, "width={w}");
-        assert!(h >= 480.0 && h <= 860.0, "height={h}");
+        assert!(w >= 340.0 && w <= 420.0, "width={w}");
+        assert!(h >= 440.0 && h <= 600.0, "height={h}");
     }
 
     #[test]
@@ -163,15 +164,15 @@ mod tests {
     #[test]
     fn window_size_small_screen_clamps_to_minimum() {
         let (w, h) = compute_window_size(Some((800, 600)));
-        assert_eq!(w, 360.0);
-        assert_eq!(h, 480.0);
+        assert_eq!(w, 340.0);
+        assert_eq!(h, 440.0);
     }
 
     #[test]
     fn window_size_4k_clamps_to_maximum() {
         let (w, h) = compute_window_size(Some((3840, 2160)));
-        assert_eq!(w, 600.0);
-        assert_eq!(h, 860.0);
+        assert_eq!(w, 420.0);
+        assert_eq!(h, 600.0);
     }
 
     #[test]

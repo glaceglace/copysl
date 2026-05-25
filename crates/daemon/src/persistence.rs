@@ -8,9 +8,9 @@ use common::{ClipboardEntry, ContentPayload, EntryId};
 use rusqlite::{params, Connection};
 
 pub fn db_path() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("Could not determine data directory")
-        .join("copysl")
+    dirs::home_dir()
+        .expect("Could not determine home directory")
+        .join(".copysl")
         .join("history.db")
 }
 

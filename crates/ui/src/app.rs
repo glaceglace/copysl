@@ -445,17 +445,21 @@ impl CopyslApp {
 
 /// Configure fonts and interaction style.
 ///
-/// Two system fonts are loaded when available:
+/// Fonts are loaded in three layers, tried in order for each glyph:
 ///
-/// 1. A sans-serif font (DejaVu / Liberation / Noto Sans / FreeSans) placed
-///    first in the Proportional family so that symbols like `←` and `≡` render
-///    correctly.  egui's bundled Ubuntu-Light lacks these codepoints.
+/// 1. A system sans-serif (DejaVu / Liberation / Noto Sans / FreeSans) at
+///    position 0 — covers Latin, Greek, Cyrillic.
 ///
-/// 2. A monochrome emoji font (NotoEmoji-Regular from the system) placed right
-///    after the sans font.  This may cover more emoji than egui's bundled copy.
+/// 2. A monochrome emoji font (NotoEmoji-Regular) at position 1.
 ///
-/// If neither is found the function falls through and `ctx.set_fonts` is still
-/// called with the default definitions (no-op equivalent, but consistent).
+/// 3. Script-specific fallbacks appended in order: CJK, Arabic, Devanagari,
+///    Hebrew, Thai, Tamil, Bengali, Telugu, Kannada, Malayalam, Gujarati,
+///    Gurmukhi, Myanmar, Khmer, Lao, Sinhala, Armenian, Georgian, Ethiopic.
+///    Each entry is skipped silently when no matching file is found on the system.
+///
+/// Plain Droid TTF files are preferred where available (most compatible with
+/// fontdue).  Variable-font Noto files work as fallbacks; fontdue ignores the
+/// variation tables and renders the default-weight outlines.
 pub fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
@@ -511,6 +515,173 @@ pub fn setup_fonts(ctx: &egui::Context) {
             // Insert after SystemSans (index 1) if present, else at front (index 0)
             family.insert(emoji_insert_pos(family), "SystemEmoji".to_owned());
             break;
+        }
+    }
+
+    // ── 3. Script-specific fallbacks ─────────────────────────────────────────
+    // Table: (font key, candidate paths in distro-preference order).
+    // Plain Droid TTF files are listed first — no VF/TTC complexity.
+    // Noto VF files (literal "[wght]" in filename on Fedora) follow as
+    // cross-distro fallbacks; fontdue reads the default-weight outlines only.
+    let script_fallbacks: &[(&str, &[&str])] = &[
+        // CJK Unified Ideographs — Chinese, Japanese kanji, Korean hanja
+        ("SystemCJK", &[
+            "/usr/share/fonts/google-droid-sans-fonts/DroidSansFallbackFull.ttf", // Fedora
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",          // Debian/Ubuntu
+            "/usr/share/fonts/droid/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/TTF/DroidSansFallbackFull.ttf",                     // Arch
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",          // Fedora (static)
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",            // Debian/Ubuntu
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/TTF/NotoSansCJK-Regular.ttc",                      // Arch
+        ]),
+        // Arabic script — Arabic, Urdu, Persian, Pashto, Uyghur…
+        ("SystemArabic", &[
+            "/usr/share/fonts/google-noto-vf/NotoSansArabic[wght].ttf",          // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",         // Debian/Ubuntu
+            "/usr/share/fonts/noto/NotoSansArabic-Regular.ttf",                  // Arch
+            "/usr/share/fonts/TTF/NotoSansArabic-Regular.ttf",
+            "/usr/share/fonts/google-noto/NotoSansArabic-Regular.ttf",
+        ]),
+        // Devanagari script — Hindi, Marathi, Sanskrit, Nepali…
+        ("SystemDevanagari", &[
+            "/usr/share/fonts/google-droid-sans-fonts/DroidSansDevanagari-Regular.ttf", // Fedora
+            "/usr/share/fonts/google-noto-vf/NotoSansDevanagari[wght].ttf",            // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansDevanagari-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansDevanagari-Regular.ttf",
+        ]),
+        // Hebrew
+        ("SystemHebrew", &[
+            "/usr/share/fonts/google-droid-sans-fonts/DroidSansHebrew-Regular.ttf",    // Fedora
+            "/usr/share/fonts/google-noto-vf/NotoSansHebrew[wght].ttf",               // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansHebrew-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansHebrew-Regular.ttf",
+        ]),
+        // Thai
+        ("SystemThai", &[
+            "/usr/share/fonts/google-droid-sans-fonts/DroidSansThai.ttf",             // Fedora
+            "/usr/share/fonts/google-noto-vf/NotoSansThai[wght].ttf",                // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansThai-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansThai-Regular.ttf",
+        ]),
+        // Tamil — Dravidian, southern India / Sri Lanka
+        ("SystemTamil", &[
+            "/usr/share/fonts/google-droid-sans-fonts/DroidSansTamil-Regular.ttf",    // Fedora
+            "/usr/share/fonts/google-noto-vf/NotoSansTamil[wght].ttf",               // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansTamil-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansTamil-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansTamil-Regular.ttf",
+        ]),
+        // Bengali — Bangladesh, West Bengal, Assam
+        ("SystemBengali", &[
+            "/usr/share/fonts/google-noto-vf/NotoSansBengali[wght].ttf",             // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansBengali-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansBengali-Regular.ttf",
+        ]),
+        // Telugu — Andhra Pradesh, Telangana
+        ("SystemTelugu", &[
+            "/usr/share/fonts/google-noto-vf/NotoSansTelugu[wght].ttf",              // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansTelugu-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansTelugu-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansTelugu-Regular.ttf",
+        ]),
+        // Kannada — Karnataka
+        ("SystemKannada", &[
+            "/usr/share/fonts/google-noto-vf/NotoSansKannada[wght].ttf",             // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansKannada-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansKannada-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansKannada-Regular.ttf",
+        ]),
+        // Malayalam — Kerala
+        ("SystemMalayalam", &[
+            "/usr/share/fonts/rit-meera-new-fonts/RIT-MeeraNew.otf",                 // Fedora
+            "/usr/share/fonts/truetype/noto/NotoSansMalayalam-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansMalayalam-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansMalayalam-Regular.ttf",
+        ]),
+        // Gujarati — Gujarat, western India
+        ("SystemGujarati", &[
+            "/usr/share/fonts/google-noto-vf/NotoSansGujarati[wght].ttf",            // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansGujarati-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansGujarati-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansGujarati-Regular.ttf",
+        ]),
+        // Gurmukhi script — Punjabi
+        ("SystemGurmukhi", &[
+            "/usr/share/fonts/google-noto-vf/NotoSansGurmukhi[wght].ttf",            // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansGurmukhi-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansGurmukhi-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansGurmukhi-Regular.ttf",
+        ]),
+        // Myanmar / Burmese
+        ("SystemMyanmar", &[
+            "/usr/share/fonts/sil-padauk-fonts/Padauk-Regular.ttf",                  // Fedora (SIL)
+            "/usr/share/fonts/truetype/noto/NotoSansMyanmar-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansMyanmar-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansMyanmar-Regular.ttf",
+        ]),
+        // Khmer — Cambodia
+        ("SystemKhmer", &[
+            "/usr/share/fonts/google-noto-vf/NotoSansKhmer[wght].ttf",              // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansKhmer-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansKhmer-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansKhmer-Regular.ttf",
+        ]),
+        // Lao
+        ("SystemLao", &[
+            "/usr/share/fonts/google-noto-vf/NotoSansLao[wght].ttf",                // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansLao-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansLao-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansLao-Regular.ttf",
+        ]),
+        // Sinhala — Sri Lanka
+        ("SystemSinhala", &[
+            "/usr/share/fonts/google-noto-vf/NotoSansSinhala[wght].ttf",            // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansSinhala-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansSinhala-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansSinhala-Regular.ttf",
+        ]),
+        // Armenian
+        ("SystemArmenian", &[
+            "/usr/share/fonts/google-droid-sans-fonts/DroidSansArmenian.ttf",        // Fedora
+            "/usr/share/fonts/google-noto-vf/NotoSansArmenian[wght].ttf",           // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansArmenian-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansArmenian-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansArmenian-Regular.ttf",
+        ]),
+        // Georgian
+        ("SystemGeorgian", &[
+            "/usr/share/fonts/google-droid-sans-fonts/DroidSansGeorgian.ttf",        // Fedora
+            "/usr/share/fonts/google-noto-vf/NotoSansGeorgian[wght].ttf",           // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansGeorgian-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansGeorgian-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansGeorgian-Regular.ttf",
+        ]),
+        // Ethiopic — Amharic, Tigrinya, Oromo…
+        ("SystemEthiopic", &[
+            "/usr/share/fonts/google-droid-sans-fonts/DroidSansEthiopic-Regular.ttf", // Fedora
+            "/usr/share/fonts/google-noto-vf/NotoSansEthiopic[wght].ttf",            // Fedora VF
+            "/usr/share/fonts/truetype/noto/NotoSansEthiopic-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansEthiopic-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoSansEthiopic-Regular.ttf",
+        ]),
+    ];
+
+    let family = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+    for (font_key, candidates) in script_fallbacks {
+        for path in *candidates {
+            if let Ok(data) = std::fs::read(path) {
+                fonts.font_data.insert(
+                    (*font_key).to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(data)),
+                );
+                family.push((*font_key).to_owned());
+                break;
+            }
         }
     }
 
@@ -913,6 +1084,49 @@ mod tests {
         let pos = emoji_insert_pos(family);
         family.insert(pos, "SystemEmoji".to_owned());
         assert_eq!(family[0], "SystemEmoji");
+    }
+
+    fn pos_in_family(family: &[String], name: &str) -> usize {
+        family.iter().position(|f| f == name)
+            .unwrap_or_else(|| panic!("{name} not found in family"))
+    }
+
+    #[test]
+    fn cjk_font_goes_after_sans_and_emoji() {
+        // Simulate the full three-step load and verify the relative order.
+        // egui's default FontDefinitions already contains "Ubuntu-Light", so
+        // we check position relationships, not absolute indices.
+        let mut fonts = egui::FontDefinitions::default();
+        let family = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+        family.insert(0, "SystemSans".to_owned());
+        let pos = emoji_insert_pos(family);
+        family.insert(pos, "SystemEmoji".to_owned());
+        family.push("SystemCJK".to_owned());
+        let sans  = pos_in_family(family, "SystemSans");
+        let emoji = pos_in_family(family, "SystemEmoji");
+        let cjk   = pos_in_family(family, "SystemCJK");
+        assert!(sans  < emoji, "sans must come before emoji");
+        assert!(emoji < cjk,   "emoji must come before CJK");
+    }
+
+    #[test]
+    fn cjk_font_goes_last_without_sans_or_emoji() {
+        let mut fonts = egui::FontDefinitions::default();
+        let family = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+        family.push("SystemCJK".to_owned());
+        assert_eq!(family.last().unwrap(), "SystemCJK");
+    }
+
+    #[test]
+    fn cjk_font_goes_last_with_only_sans() {
+        let mut fonts = egui::FontDefinitions::default();
+        let family = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+        family.insert(0, "SystemSans".to_owned());
+        family.push("SystemCJK".to_owned());
+        let sans = pos_in_family(family, "SystemSans");
+        let cjk  = pos_in_family(family, "SystemCJK");
+        assert!(sans < cjk, "sans must come before CJK");
+        assert_eq!(family.last().unwrap(), "SystemCJK");
     }
 
     #[test]

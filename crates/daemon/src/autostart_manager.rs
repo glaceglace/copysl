@@ -35,11 +35,21 @@ impl AutostartManager {
     pub fn enable(&self) -> Result<()> {
         std::fs::create_dir_all(&self.base_dir)?;
         let exe = std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from("copysl"));
+            .map_err(|e| anyhow::anyhow!("Could not determine executable path: {e}"))?;
+        let exe_str = exe.to_str()
+            .ok_or_else(|| anyhow::anyhow!("Executable path contains non-UTF-8 characters"))?;
+        // Escape backslash and double-quote per the Desktop Entry spec so that
+        // paths containing those characters remain valid inside a quoted Exec argument.
+        let exec_path = exe_str.replace('\\', "\\\\").replace('"', "\\\"");
         let content = format!(
-            "[Desktop Entry]\nType=Application\nName=Copysl\nExec={} --daemon\nHidden=false\nX-GNOME-Autostart-enabled=true\n",
-            exe.display()
+            "[Desktop Entry]\nType=Application\nName=Copysl\nExec=\"{exec_path}\" --daemon\nTerminal=false\nHidden=false\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n"
         );
+        // Guard: skip the write if the file already has the correct content.
+        // This avoids overwriting user customisations on every daemon restart
+        // while still self-healing when the executable path changes after a reinstall.
+        if std::fs::read_to_string(self.file_path()).ok().as_deref() == Some(&content) {
+            return Ok(());
+        }
         std::fs::write(self.file_path(), content)?;
         Ok(())
     }
@@ -73,6 +83,56 @@ mod tests {
         assert!(content.contains("[Desktop Entry]"));
         assert!(content.contains("--daemon"));
         assert!(content.contains("X-GNOME-Autostart-enabled=true"));
+    }
+
+    #[test]
+    fn enable_quotes_exec_path() {
+        let dir = tempdir().unwrap();
+        let manager = AutostartManager::with_base_dir(dir.path().to_path_buf());
+        manager.enable().unwrap();
+        let content = std::fs::read_to_string(manager.file_path()).unwrap();
+        assert!(content.contains("Exec=\""), "Exec path must be double-quoted");
+    }
+
+    #[test]
+    fn enable_includes_terminal_false() {
+        let dir = tempdir().unwrap();
+        let manager = AutostartManager::with_base_dir(dir.path().to_path_buf());
+        manager.enable().unwrap();
+        let content = std::fs::read_to_string(manager.file_path()).unwrap();
+        assert!(content.contains("Terminal=false"));
+    }
+
+    #[test]
+    fn enable_includes_no_display_true() {
+        let dir = tempdir().unwrap();
+        let manager = AutostartManager::with_base_dir(dir.path().to_path_buf());
+        manager.enable().unwrap();
+        let content = std::fs::read_to_string(manager.file_path()).unwrap();
+        assert!(content.contains("NoDisplay=true"));
+    }
+
+    #[test]
+    fn enable_is_no_op_when_content_unchanged() {
+        let dir = tempdir().unwrap();
+        let manager = AutostartManager::with_base_dir(dir.path().to_path_buf());
+        manager.enable().unwrap();
+        let content_first = std::fs::read_to_string(manager.file_path()).unwrap();
+        manager.enable().unwrap(); // second call — same exe, should be a no-op
+        let content_second = std::fs::read_to_string(manager.file_path()).unwrap();
+        assert_eq!(content_first, content_second);
+    }
+
+    #[test]
+    fn enable_overwrites_when_existing_content_differs() {
+        let dir = tempdir().unwrap();
+        let manager = AutostartManager::with_base_dir(dir.path().to_path_buf());
+        // Simulate a stale desktop file left by an older install.
+        std::fs::write(manager.file_path(), "stale content").unwrap();
+        manager.enable().unwrap();
+        let content = std::fs::read_to_string(manager.file_path()).unwrap();
+        assert!(content.contains("[Desktop Entry]"), "stale file must be overwritten");
+        assert!(!content.contains("stale content"));
     }
 
     #[test]

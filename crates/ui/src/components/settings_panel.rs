@@ -73,7 +73,7 @@ impl SettingsPanel {
             .inner_margin(egui::Margin::same(SPACE_L as i8));
 
         sheet_frame.show(ui, |ui| {
-            // Title row: "Settings" on the left, back button on the right
+            // Title row: "Settings" on the left, close button on the right
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("Settings")
@@ -81,7 +81,34 @@ impl SettingsPanel {
                         .strong(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new("←").frame(false)).clicked() {
+                    let btn_size = egui::vec2(16.0, 16.0);
+                    let (close_rect, close_resp) =
+                        ui.allocate_exact_size(btn_size, egui::Sense::click());
+
+                    // Same visual as the card delete button
+                    let red = egui::Color32::from_rgb(200, 60, 60);
+                    let fill = egui::Color32::from_rgba_unmultiplied(200, 60, 60, 20);
+                    ui.painter().rect(
+                        close_rect,
+                        egui::CornerRadius::same(3),
+                        fill,
+                        egui::Stroke::new(1.0, red),
+                        egui::StrokeKind::Middle,
+                    );
+                    let pad = 4.0;
+                    let p = ui.painter();
+                    p.line_segment(
+                        [close_rect.min + egui::vec2(pad, pad),
+                         close_rect.max - egui::vec2(pad, pad)],
+                        egui::Stroke::new(1.5, red),
+                    );
+                    p.line_segment(
+                        [egui::pos2(close_rect.max.x - pad, close_rect.min.y + pad),
+                         egui::pos2(close_rect.min.x + pad, close_rect.max.y - pad)],
+                        egui::Stroke::new(1.5, red),
+                    );
+
+                    if close_resp.clicked() {
                         action = Some(SettingsAction::Close);
                     }
                 });
